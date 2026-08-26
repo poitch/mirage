@@ -27,10 +27,19 @@
 #
 #        sudo mkdir -p /volume1/docker/mirage/{config,data}
 #
-#      Files:
-#        docker-compose.tailscale.yml  (this file)
-#        tailscale-serve.json          (next to it, NOT in config/)
-#        mirage.example.yaml           -> config/mirage.yaml
+#      Files, noting that the two configuration files sit at different
+#      levels because of how each is mounted:
+#
+#        /volume1/docker/mirage/
+#        |-- docker-compose.yml        (this file)
+#        |-- tailscale-serve.json      (beside the compose file)
+#        |-- .env                      (TS_AUTHKEY, MIRAGE_ADMIN_PASSWORD)
+#        |-- config/
+#        |   `-- mirage.yaml           (inside config/, from mirage.example.yaml)
+#        `-- data/
+#
+#      A mirage.yaml left in the top directory is silently unused, and Mirage
+#      exits with "read config: open /etc/mirage/mirage.yaml: no such file".
 #
 #      tailscale-serve.json is bind-mounted from beside this file, so leaving
 #      it behind stops the stack with "Bind mount failed: ... does not exist"

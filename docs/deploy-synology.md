@@ -167,7 +167,23 @@ deploy/docker-compose.tailscale.yml  ->  /volume1/docker/mirage/docker-compose.y
 deploy/tailscale-serve.json          ->  /volume1/docker/mirage/tailscale-serve.json
 ```
 
-Note that `tailscale-serve.json` sits beside the compose file, not in `config/`.
+The finished layout, which is worth checking against before starting anything —
+the two configuration files deliberately live at different levels, because
+`tailscale-serve.json` is mounted from beside the compose file while
+`mirage.yaml` is mounted as part of the `config/` directory:
+
+```
+/volume1/docker/mirage/
+├── docker-compose.yml
+├── tailscale-serve.json        <- beside the compose file
+├── .env                        <- TS_AUTHKEY, MIRAGE_ADMIN_PASSWORD
+├── config/
+│   └── mirage.yaml             <- inside config/, NOT beside the compose file
+└── data/                       <- created empty; Mirage writes the index here
+```
+
+A `mirage.yaml` in the top directory is silently unused, and Mirage exits with
+`read config: open /etc/mirage/mirage.yaml: no such file or directory`.
 
 ### 6. Start it
 
