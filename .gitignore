@@ -6,3 +6,6 @@
 mirage.yaml
 !deploy/mirage.example.yaml
 .DS_Store
+
+# Local development scratch
+.local/
