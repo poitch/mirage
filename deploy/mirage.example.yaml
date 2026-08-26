@@ -1,0 +1,51 @@
+# Mirage server configuration.
+#
+# This file is the source of truth for which accounts exist and where each one
+# stores its files. Passwords are not kept here; set them with
+# `mirage user passwd <username>`.
+
+server:
+  listen: ":8080"
+
+  # The URL clients actually reach this server on, as they would type it into
+  # the Nextcloud client. Mirage bakes it into the login and push URLs it hands
+  # out, so a container-internal address here will break client pairing.
+  # Use https in production: sync clients send credentials on every request.
+  external_url: "https://nas.example.com"
+
+database:
+  # Index and credentials. Holds no file content, so losing it costs a rescan.
+  path: /var/lib/mirage/mirage.db
+
+storage:
+  # Permissions stamped on everything Mirage creates. 0640/0750 keeps files
+  # private to the owning user and their group.
+  file_mode: "0640"
+  dir_mode: "0750"
+
+  # Full reconciliation walk. This is the backstop that catches changes made
+  # over SMB or in File Station when the filesystem watcher misses them, so
+  # leave it on even with the watcher enabled.
+  rescan_interval: 15m
+  watcher: true
+
+users:
+  # `home` is the path *inside the container*: /volume1/homes is mounted at
+  # /volumes/homes by the compose file, so /volume1/homes/alice appears here as
+  # /volumes/homes/alice.
+  #
+  # `uid` and `gid` must match the NAS account that owns that directory, or
+  # files Mirage writes will be unreadable over SMB. Find them with `id alice`
+  # over SSH. `mirage doctor` verifies the mapping and warns on a mismatch.
+  - username: alice
+    display_name: Alice
+    home: /volumes/homes/alice
+    uid: 1026
+    gid: 100
+
+  - username: bob
+    display_name: Bob
+    home: /volumes/homes/bob
+    uid: 1027
+    gid: 100
+    quota: 107374182400   # 100 GiB; omit or set 0 for unlimited

@@ -1,0 +1,8 @@
+/mirage
+/dist/
+*.db
+*.db-wal
+*.db-shm
+mirage.yaml
+!deploy/mirage.example.yaml
+.DS_Store

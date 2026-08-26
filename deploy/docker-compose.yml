@@ -1,0 +1,44 @@
+# Mirage on a Synology NAS.
+#
+# Before first start:
+#   1. mkdir -p /volume1/docker/mirage/{config,data}
+#   2. Copy mirage.example.yaml to /volume1/docker/mirage/config/mirage.yaml
+#      and edit the users block. Find each user's uid/gid over SSH with `id <user>`.
+#   3. docker compose up -d
+#   4. docker compose exec mirage mirage doctor      # confirms the mapping
+#   5. docker compose exec mirage mirage user passwd <username>
+
+services:
+  mirage:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: ghcr.io/poitch/mirage:latest
+    container_name: mirage
+    restart: unless-stopped
+
+    ports:
+      - "8080:8080"
+
+    volumes:
+      - /volume1/docker/mirage/config:/etc/mirage:ro
+      - /volume1/docker/mirage/data:/var/lib/mirage
+      # The NAS home directories. Mirage maps each user onto a subdirectory of
+      # this mount; the paths in mirage.yaml are the container-side ones.
+      - /volume1/homes:/volumes/homes
+
+    environment:
+      TZ: Etc/UTC
+      MIRAGE_CONFIG: /etc/mirage/mirage.yaml
+
+    # Root is required for cross-user chown, but nothing else is. Dropping the
+    # rest of the capability set limits what a compromise could reach.
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN          # stamp each user's uid/gid onto files Mirage creates
+      - DAC_OVERRIDE   # write into home directories owned by other users
+      - DAC_READ_SEARCH
+      - FOWNER         # chmod and set mtime on files Mirage does not own
+    security_opt:
+      - no-new-privileges:true
