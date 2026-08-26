@@ -32,6 +32,13 @@ var prefixes = map[string]string{
 	NSSabre:     "s",
 }
 
+// ComplianceClasses is the DAV header Mirage sends.
+//
+// Class 2 is deliberately absent: it means WebDAV locking, which Mirage does
+// not implement. Nextcloud advertises the same set unless its locking plugin is
+// enabled, and its own sync clients do not use locks.
+const ComplianceClasses = "1, 3, extended-mkcol"
+
 // PropName identifies a WebDAV property.
 type PropName struct {
 	Space string
@@ -103,6 +110,43 @@ func parsePropfind(r io.Reader) (names []PropName, allProps bool, err error) {
 // bodies are a few hundred bytes.
 const maxPropfindBody = 1 << 20
 
+// proppatchRequest is the parsed body of a PROPPATCH.
+type proppatchRequest struct {
+	XMLName xml.Name `xml:"DAV: propertyupdate"`
+	Set     []struct {
+		Prop propContainer `xml:"DAV: prop"`
+	} `xml:"DAV: set"`
+	Remove []struct {
+		Prop propContainer `xml:"DAV: prop"`
+	} `xml:"DAV: remove"`
+}
+
+// parseProppatch returns every property a PROPPATCH tried to set or remove.
+func parseProppatch(r io.Reader) ([]PropName, error) {
+	body, err := io.ReadAll(io.LimitReader(r, maxPropfindBody))
+	if err != nil {
+		return nil, err
+	}
+	var req proppatchRequest
+	if err := xml.Unmarshal(body, &req); err != nil {
+		return nil, fmt.Errorf("malformed PROPPATCH body: %w", err)
+	}
+
+	var names []PropName
+	collect := func(c propContainer) {
+		for _, n := range c.Names {
+			names = append(names, PropName{Space: n.XMLName.Space, Local: n.XMLName.Local})
+		}
+	}
+	for _, set := range req.Set {
+		collect(set.Prop)
+	}
+	for _, rm := range req.Remove {
+		collect(rm.Prop)
+	}
+	return names, nil
+}
+
 // prop is a resolved property and its rendered XML content.
 type prop struct {
 	Name PropName
@@ -122,7 +166,7 @@ type multistatus struct {
 
 func newMultistatus(w http.ResponseWriter) *multistatus {
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
-	w.Header().Set("DAV", "1, 2, 3")
+	w.Header().Set("DAV", ComplianceClasses)
 	w.WriteHeader(http.StatusMultiStatus)
 
 	m := &multistatus{w: bufio.NewWriter(w)}
@@ -164,6 +208,22 @@ func (m *multistatus) writeResponse(href string, found []prop, missing []PropNam
 		m.print("      </d:prop>\n      <d:status>HTTP/1.1 404 Not Found</d:status>\n    </d:propstat>\n")
 	}
 
+	m.print("  </d:response>\n")
+}
+
+// writeStatusResponse emits a response whose properties all share one status.
+// It is what PROPPATCH needs: the properties carry no values, only an outcome.
+func (m *multistatus) writeStatusResponse(href string, names []PropName, status string) {
+	m.print("  <d:response>\n")
+	m.print("    <d:href>" + escapeText(href) + "</d:href>\n")
+	if len(names) > 0 {
+		m.print("    <d:propstat>\n      <d:prop>\n")
+		for _, name := range names {
+			tag, ns := name.tag()
+			m.print("        <" + tag + ns + "/>\n")
+		}
+		m.print("      </d:prop>\n      <d:status>" + escapeText(status) + "</d:status>\n    </d:propstat>\n")
+	}
 	m.print("  </d:response>\n")
 }
 

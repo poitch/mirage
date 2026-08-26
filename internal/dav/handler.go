@@ -10,16 +10,22 @@ import (
 
 	"github.com/poitch/mirage/internal/auth"
 	"github.com/poitch/mirage/internal/fsx"
+	"github.com/poitch/mirage/internal/index"
 	"github.com/poitch/mirage/internal/store"
 )
 
 // FilesPrefix is the WebDAV root for a user's files.
 const FilesPrefix = "/remote.php/dav/files/"
 
+// LegacyPrefix is the pre-DAV root, still probed by desktop clients.
+const LegacyPrefix = "/remote.php/webdav/"
+
 // Handler serves the files WebDAV endpoint.
 type Handler struct {
 	db         *store.DB
 	storage    *fsx.Manager
+	updater    *index.Updater
+	scanner    *index.Scanner
 	log        *slog.Logger
 	instanceID string
 	// readOnly reflects what the server can currently honour. It drives both
@@ -29,8 +35,12 @@ type Handler struct {
 }
 
 // NewHandler builds the files handler.
-func NewHandler(db *store.DB, storage *fsx.Manager, log *slog.Logger, instanceID string, readOnly bool) *Handler {
-	return &Handler{db: db, storage: storage, log: log, instanceID: instanceID, readOnly: readOnly}
+func NewHandler(db *store.DB, storage *fsx.Manager, updater *index.Updater,
+	scanner *index.Scanner, log *slog.Logger, instanceID string, readOnly bool) *Handler {
+	return &Handler{
+		db: db, storage: storage, updater: updater, scanner: scanner,
+		log: log, instanceID: instanceID, readOnly: readOnly,
+	}
 }
 
 // allowedMethods is the Allow header, and the authority on what is accepted.
@@ -38,7 +48,7 @@ func (h *Handler) allowedMethods() string {
 	if h.readOnly {
 		return "OPTIONS, HEAD, GET, PROPFIND"
 	}
-	return "OPTIONS, HEAD, GET, PUT, DELETE, MKCOL, COPY, MOVE, PROPFIND, PROPPATCH, LOCK, UNLOCK"
+	return "OPTIONS, HEAD, GET, PUT, DELETE, MKCOL, COPY, MOVE, PROPFIND, PROPPATCH"
 }
 
 // ServeHTTP dispatches a request to /remote.php/dav/files/{user}/..., where
@@ -82,18 +92,43 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, principal store.
 		h.handlePropfind(w, r, principal, cleanPath)
 	case http.MethodGet, http.MethodHead:
 		h.handleGet(w, r, principal, cleanPath)
+	case http.MethodPut:
+		h.ifWritable(w, func() { h.handlePut(w, r, principal, cleanPath) })
+	case http.MethodDelete:
+		h.ifWritable(w, func() { h.handleDelete(w, r, principal, cleanPath) })
+	case "MKCOL":
+		h.ifWritable(w, func() { h.handleMkcol(w, r, principal, cleanPath) })
+	case "MOVE":
+		h.ifWritable(w, func() { h.handleMoveCopy(w, r, principal, cleanPath, true) })
+	case "COPY":
+		h.ifWritable(w, func() { h.handleMoveCopy(w, r, principal, cleanPath, false) })
+	case "PROPPATCH":
+		h.ifWritable(w, func() { h.handleProppatch(w, r, principal, cleanPath) })
 	default:
 		w.Header().Set("Allow", h.allowedMethods())
-		w.Header().Set("DAV", "1, 2, 3")
+		w.Header().Set("DAV", ComplianceClasses)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
+// ifWritable runs fn unless the server is in read-only mode, in which case it
+// answers 405. Routing writes through one place keeps the accepted methods and
+// the advertised oc:permissions from drifting apart.
+func (h *Handler) ifWritable(w http.ResponseWriter, fn func()) {
+	if h.readOnly {
+		w.Header().Set("Allow", h.allowedMethods())
+		w.Header().Set("DAV", ComplianceClasses)
+		http.Error(w, "server is read-only", http.StatusMethodNotAllowed)
+		return
+	}
+	fn()
+}
+
 func (h *Handler) handleOptions(w http.ResponseWriter) {
 	w.Header().Set("Allow", h.allowedMethods())
-	// Advertising WebDAV classes 1, 2 and 3 is what tells a client this is a
-	// full WebDAV server rather than a plain HTTP file host.
-	w.Header().Set("DAV", "1, 2, 3")
+	// The DAV header is what tells a client this is a WebDAV server rather than
+	// a plain HTTP file host.
+	w.Header().Set("DAV", ComplianceClasses)
 	w.Header().Set("MS-Author-Via", "DAV")
 	w.WriteHeader(http.StatusOK)
 }

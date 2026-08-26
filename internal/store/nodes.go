@@ -225,3 +225,31 @@ func FinalizeDirNode(ctx context.Context, q Querier, id int64, etag string, size
 		etag, size, mtime.Unix(), time.Now().Unix(), id)
 	return err
 }
+
+// MoveNode relocates an entry and rewrites the paths of everything beneath it.
+//
+// File IDs are deliberately left alone, for the node and every descendant.
+// That is the whole point of a stable ID: a client that sees a familiar ID at a
+// new path performs a local rename, where a new ID would make it delete and
+// re-download the entire subtree.
+func MoveNode(ctx context.Context, q Querier, userID int64, oldPath, newPath string, newParentID int64, newName string) error {
+	var parent any
+	if newParentID != 0 {
+		parent = newParentID
+	}
+	if _, err := q.ExecContext(ctx, `
+		UPDATE nodes SET path = ?, name = ?, parent_id = ?
+		WHERE user_id = ? AND path = ?`,
+		newPath, newName, parent, userID, oldPath); err != nil {
+		return err
+	}
+
+	// Descendants keep their parent_id chain; only the textual path shifts.
+	// substr is 1-indexed, so len(oldPath)+1 starts at the separator that
+	// follows the old prefix.
+	_, err := q.ExecContext(ctx, `
+		UPDATE nodes SET path = ? || substr(path, ?)
+		WHERE user_id = ? AND path LIKE ? ESCAPE '\'`,
+		newPath, len(oldPath)+1, userID, escapeLike(oldPath+"/")+"%")
+	return err
+}

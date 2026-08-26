@@ -157,6 +157,11 @@ func (s *Scanner) scanDir(ctx context.Context, st *fsx.Storage, user store.User,
 		stats.Bytes += childInfo.Size()
 	}
 
+	// Held only for this directory's mutation, not across the recursion above:
+	// a full scan of a large tree must not block uploads for its duration.
+	unlock := indexLocks.lock(user.ID)
+	defer unlock()
+
 	if err := store.DeleteMissingChildren(ctx, s.db, dirID, keep); err != nil {
 		return "", 0, fmt.Errorf("prune %s: %w", dirPath, err)
 	}
@@ -166,6 +171,63 @@ func (s *Scanner) scanDir(ctx context.Context, st *fsx.Storage, user store.User,
 		return "", 0, fmt.Errorf("finalize %s: %w", dirPath, err)
 	}
 	return etag, total, nil
+}
+
+// ScanPath reindexes one subtree and refreshes the directories above it.
+//
+// It exists for operations that create many entries at once - a COPY of a
+// directory tree - where synthesising an index entry per file would duplicate
+// the scanner badly.
+func (s *Scanner) ScanPath(ctx context.Context, user store.User, target string) error {
+	st, err := s.storage.For(user.ID, user.Home, user.UID, user.GID)
+	if err != nil {
+		return fmt.Errorf("open storage for %s: %w", user.Username, err)
+	}
+	info, err := st.Stat(target)
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", target, err)
+	}
+
+	parentPath := parentDir(target)
+	var parentID int64
+	if !fsx.IsRoot(target) {
+		parent, err := store.NodeByPath(ctx, s.db, user.ID, parentPath)
+		if err != nil {
+			return fmt.Errorf("parent of %s is not indexed: %w", target, err)
+		}
+		parentID = parent.ID
+	}
+
+	var stats Stats
+	if info.IsDir() {
+		if _, _, err := s.scanDir(ctx, st, user, target, parentID, &stats); err != nil {
+			return err
+		}
+	} else {
+		unlock := indexLocks.lock(user.ID)
+		name := path.Base(target)
+		_, err := store.UpsertNode(ctx, s.db, store.Node{
+			UserID:      user.ID,
+			ParentID:    parentID,
+			Path:        target,
+			Name:        name,
+			IsDir:       false,
+			Size:        info.Size(),
+			MTime:       info.ModTime(),
+			ETag:        FileETag(info.Size(), info.ModTime()),
+			ContentType: contentType(name),
+			Dev:         devOf(info),
+			Inode:       inodeOf(info),
+		})
+		unlock()
+		if err != nil {
+			return fmt.Errorf("index %s: %w", target, err)
+		}
+	}
+
+	unlock := indexLocks.lock(user.ID)
+	defer unlock()
+	return propagate(ctx, s.db, user.ID, parentPath)
 }
 
 // ScanAll scans every enabled user in turn.

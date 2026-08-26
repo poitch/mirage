@@ -46,21 +46,19 @@ func New(ctx context.Context, cfg *config.Config, db *store.DB, log *slog.Logger
 
 	storage := fsx.NewManager(cfg.Storage.FileMode.Perm(), cfg.Storage.DirMode.Perm())
 	scanner := index.NewScanner(db, storage, log)
+	updater := index.NewUpdater(db)
 
-	// Writes arrive in the next milestone. Until then the server says so, in
-	// both the advertised permissions and the methods it accepts, rather than
-	// letting clients discover it by failing.
-	const readOnly = true
-	davHandler := dav.NewHandler(db, storage, log, instanceID, readOnly)
+	const readOnly = false
+	davHandler := dav.NewHandler(db, storage, updater, scanner, log, instanceID, readOnly)
 
 	loginFlow, err := auth.NewLoginFlow(db, authenticator, cfg.Server.ExternalURL, log)
 	if err != nil {
 		return nil, fmt.Errorf("build login flow: %w", err)
 	}
 
-	// Trashbin and versioning stay unadvertised until they are implemented:
-	// announcing them would put controls in the client that then fail.
-	features := ocs.Features{Trashbin: false, Versioning: false}
+	// Each capability stays unadvertised until it is implemented: announcing
+	// one early puts a control in the client that then fails.
+	features := ocs.Features{Trashbin: false, Versioning: false, Chunking: false}
 
 	usage := func(ctx context.Context, u store.User) (int64, error) {
 		return store.UserUsage(ctx, db, u.ID)

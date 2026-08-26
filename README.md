@@ -28,7 +28,7 @@ Early development. Milestone progress:
 - [x] **M0** — config, index database, CLI, container image
 - [x] **M1** — client pairing: `status.php`, capabilities, Login Flow v2
 - [x] **M2** — read-only sync: PROPFIND/GET, file index, ETag propagation
-- [ ] **M3** — bidirectional sync: PUT/MKCOL/DELETE/MOVE/COPY, UID/GID stamping
+- [x] **M3** — bidirectional sync: PUT/MKCOL/DELETE/MOVE/COPY, UID/GID stamping
 - [ ] **M4** — chunked upload for large files
 - [ ] **M5** — out-of-band changes: watcher, rescan, rename detection
 - [ ] **M6** — instant sync via notify_push
@@ -55,11 +55,13 @@ traversal and symlinks pointing outside it fail at the syscall.
 
 ## Trying it with a real client
 
-As of M2 the server is **read-only**: a Nextcloud client will pair, list your
-files, and download all of them, but uploads are refused. Mirage says so up
-front — it advertises read-only permissions and a matching `Allow` header — so
-the client marks the folder read-only rather than failing mid-sync. M3 makes it
-bidirectional.
+Sync is bidirectional as of M3: create, edit, rename and delete on a client and
+it reaches the NAS, and the reverse. Files land owned by the mapped NAS user, so
+they stay usable over SMB.
+
+Chunked upload arrives in M4. Until then Mirage does not advertise it, so
+clients upload even large files with a single PUT. That works; it just restarts
+from the beginning if the connection drops.
 
 Either run it directly:
 
@@ -82,7 +84,7 @@ Then in the Nextcloud desktop client, use **Log in** and enter your
 `external_url`. The client opens a browser, you sign in, and it pairs — the
 account password is only used here, and the client gets its own app password.
 
-Two things to know while testing:
+Three things to know while testing:
 
 `external_url` must be the address the client can actually reach, because it is
 baked into the pairing and poll URLs handed to the client. A container-internal
@@ -91,6 +93,11 @@ address will pair and then hang.
 Until the filesystem watcher lands in M5, `storage.rescan_interval` is how long
 it takes for a file added over SMB to reach clients. Lower it for testing, or
 run `mirage scan`.
+
+Mirage must run as **root** to chown files to each user's uid/gid. It will
+otherwise still work, but files land owned by the server process and are
+unreachable over SMB. `mirage doctor` warns about this, and every affected
+upload is logged.
 
 ## Running it
 

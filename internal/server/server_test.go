@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/xml"
 	"io"
 	"log/slog"
@@ -9,8 +11,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/poitch/mirage/internal/auth"
 	"github.com/poitch/mirage/internal/config"
@@ -182,6 +187,47 @@ func parseMultistatus(t *testing.T, body string) multistatusDoc {
 	return doc
 }
 
+// prop fetches one property of one resource, for assertions that care about a
+// single value rather than the shape of a listing.
+func (h *harness) prop(t *testing.T, path, space, local string) string {
+	t.Helper()
+	body := `<?xml version="1.0"?><d:propfind xmlns:d="DAV:" xmlns:oc="` + space + `">` +
+		`<d:prop><oc:` + local + `/></d:prop></d:propfind>`
+	if space == "DAV:" {
+		body = `<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:` + local + `/></d:prop></d:propfind>`
+	}
+	resp := h.do("PROPFIND", path, "alice", alicePassword, body, map[string]string{"Depth": "0"})
+	if resp.StatusCode != http.StatusMultiStatus {
+		t.Fatalf("PROPFIND %s: status = %d", path, resp.StatusCode)
+	}
+	raw := readBody(t, resp)
+	re := regexp.MustCompile(`<(?:d|oc):` + regexp.QuoteMeta(local) + `>([^<]*)<`)
+	m := re.FindStringSubmatch(raw)
+	if m == nil {
+		return ""
+	}
+	return m[1]
+}
+
+func (h *harness) etag(t *testing.T, path string) string {
+	t.Helper()
+	return h.prop(t, path, "DAV:", "getetag")
+}
+
+func (h *harness) fileID(t *testing.T, path string) string {
+	t.Helper()
+	return h.prop(t, path, "http://owncloud.org/ns", "fileid")
+}
+
+func aliceID(t *testing.T, h *harness) int64 {
+	t.Helper()
+	u, err := h.db.UserByName(context.Background(), "alice")
+	if err != nil {
+		t.Fatalf("look up alice: %v", err)
+	}
+	return u.ID
+}
+
 func (d multistatusDoc) hrefs() []string {
 	out := make([]string, 0, len(d.Responses))
 	for _, r := range d.Responses {
@@ -319,25 +365,437 @@ func TestGetDirectoryIsRejected(t *testing.T) {
 	resp.Body.Close()
 }
 
-// TestReadOnlyRefusesWrites keeps the advertised permissions and the accepted
-// methods from drifting apart: while oc:permissions says read-only, a write
-// must actually be refused.
-func TestReadOnlyRefusesWrites(t *testing.T) {
+// TestWritePermissionsAreAdvertised keeps the advertised permissions and the
+// accepted methods from drifting apart: a client believes oc:permissions, and
+// offers exactly the operations it claims.
+func TestWritePermissionsAreAdvertised(t *testing.T) {
 	h := newHarness(t)
-	for _, method := range []string{http.MethodPut, http.MethodDelete, "MKCOL", "MOVE", "PROPPATCH"} {
-		resp := h.do(method, "/remote.php/dav/files/alice/new.txt", "alice", alicePassword, "x", nil)
-		if resp.StatusCode != http.StatusMethodNotAllowed {
-			t.Errorf("%s: status = %d, want 405", method, resp.StatusCode)
-		}
-		if allow := resp.Header.Get("Allow"); !strings.Contains(allow, "PROPFIND") {
-			t.Errorf("%s: Allow = %q, want it to advertise PROPFIND", method, allow)
-		}
-		resp.Body.Close()
-	}
 
 	resp := h.propfind("/remote.php/dav/files/alice/hello.txt", "alice", alicePassword, "0")
-	if body := readBody(t, resp); !strings.Contains(body, "<oc:permissions>G</oc:permissions>") {
-		t.Error("read-only server did not advertise read-only permissions")
+	if body := readBody(t, resp); !strings.Contains(body, "<oc:permissions>GDNVW</oc:permissions>") {
+		t.Error("a writable file should advertise W")
+	}
+	resp = h.propfind("/remote.php/dav/files/alice/docs/", "alice", alicePassword, "0")
+	if body := readBody(t, resp); !strings.Contains(body, "<oc:permissions>GDNVCK</oc:permissions>") {
+		t.Error("a writable directory should advertise C and K")
+	}
+
+	resp = h.do("OPTIONS", "/remote.php/dav/files/alice/", "alice", alicePassword, "", nil)
+	allow := resp.Header.Get("Allow")
+	resp.Body.Close()
+	for _, method := range []string{"PUT", "DELETE", "MKCOL", "MOVE", "COPY", "PROPPATCH"} {
+		if !strings.Contains(allow, method) {
+			t.Errorf("Allow = %q, missing %s", allow, method)
+		}
+	}
+	// Class 2 means locking, which is not implemented, so it must not be
+	// claimed - and Nextcloud does not claim it either.
+	if dav := resp.Header.Get("DAV"); strings.Contains(dav, "2") {
+		t.Errorf("DAV = %q, must not advertise class 2 without locking", dav)
+	}
+}
+
+func TestPutCreatesAndReplaces(t *testing.T) {
+	h := newHarness(t)
+	target := "/remote.php/dav/files/alice/docs/uploaded.txt"
+
+	resp := h.do(http.MethodPut, target, "alice", alicePassword, "first version", nil)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create: status = %d, want 201", resp.StatusCode)
+	}
+	if resp.Header.Get("OC-FileId") == "" {
+		t.Error("create: no OC-FileId header")
+	}
+	firstETag := resp.Header.Get("ETag")
+	resp.Body.Close()
+
+	onDisk := filepath.Join(h.homes["alice"], "docs", "uploaded.txt")
+	if got, err := os.ReadFile(onDisk); err != nil || string(got) != "first version" {
+		t.Fatalf("file on disk = %q, %v; want %q", got, err, "first version")
+	}
+
+	// Replacing an existing file is a 204, not a 201.
+	resp = h.do(http.MethodPut, target, "alice", alicePassword, "second version, longer", nil)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("replace: status = %d, want 204", resp.StatusCode)
+	}
+	if resp.Header.Get("ETag") == firstETag {
+		t.Error("replacing the content did not change the ETag")
+	}
+	resp.Body.Close()
+
+	resp = h.do(http.MethodGet, target, "alice", alicePassword, "", nil)
+	if got := readBody(t, resp); got != "second version, longer" {
+		t.Errorf("round trip returned %q", got)
+	}
+}
+
+// TestPutPropagatesToRoot is the sync-critical property on the write path: a
+// client that sees an unchanged root ETag never looks deeper.
+func TestPutPropagatesToRoot(t *testing.T) {
+	h := newHarness(t)
+	rootBefore := h.etag(t, "/remote.php/dav/files/alice/")
+	deepBefore := h.etag(t, "/remote.php/dav/files/alice/docs/nested/")
+
+	resp := h.do(http.MethodPut, "/remote.php/dav/files/alice/docs/nested/new.txt",
+		"alice", alicePassword, "content", nil)
+	resp.Body.Close()
+
+	if h.etag(t, "/remote.php/dav/files/alice/docs/nested/") == deepBefore {
+		t.Error("the containing directory ETag did not change")
+	}
+	if h.etag(t, "/remote.php/dav/files/alice/") == rootBefore {
+		t.Error("the root ETag did not change; clients would never see the upload")
+	}
+}
+
+func TestPutPreservesModificationTime(t *testing.T) {
+	h := newHarness(t)
+	want := time.Now().Add(-90 * 24 * time.Hour).Truncate(time.Second)
+
+	resp := h.do(http.MethodPut, "/remote.php/dav/files/alice/old.txt",
+		"alice", alicePassword, "aged", map[string]string{
+			"X-OC-Mtime": strconv.FormatInt(want.Unix(), 10),
+		})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want 201", resp.StatusCode)
+	}
+	// Clients look for this to confirm the timestamp survived.
+	if got := resp.Header.Get("X-OC-MTime"); got != "accepted" {
+		t.Errorf("X-OC-MTime = %q, want accepted", got)
+	}
+	resp.Body.Close()
+
+	info, err := os.Stat(filepath.Join(h.homes["alice"], "old.txt"))
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if !info.ModTime().Truncate(time.Second).Equal(want) {
+		t.Errorf("mtime on disk = %v, want %v", info.ModTime(), want)
+	}
+}
+
+// TestPutVerifiesChecksum: a corrupted upload must not replace a good file.
+func TestPutVerifiesChecksum(t *testing.T) {
+	h := newHarness(t)
+	body := "verified content"
+	sum := sha1.Sum([]byte(body))
+	correct := "SHA1:" + hex.EncodeToString(sum[:])
+
+	resp := h.do(http.MethodPut, "/remote.php/dav/files/alice/sums.txt",
+		"alice", alicePassword, body, map[string]string{"OC-Checksum": correct})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("matching checksum: status = %d, want 201", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp = h.do(http.MethodPut, "/remote.php/dav/files/alice/sums.txt",
+		"alice", alicePassword, "different content",
+		map[string]string{"OC-Checksum": correct})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("mismatched checksum: status = %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// The good version must survive the rejected upload.
+	got, err := os.ReadFile(filepath.Join(h.homes["alice"], "sums.txt"))
+	if err != nil || string(got) != body {
+		t.Errorf("file on disk = %q, %v; a failed upload must not damage it", got, err)
+	}
+}
+
+func TestPutRejectsBadTargets(t *testing.T) {
+	h := newHarness(t)
+	tests := []struct {
+		name, path string
+		want       int
+	}{
+		// RFC 4918: writing into a collection that does not exist is a
+		// conflict, which tells the client to MKCOL first.
+		{"missing parent", "/remote.php/dav/files/alice/nope/deep/file.txt", http.StatusConflict},
+		{"over a directory", "/remote.php/dav/files/alice/docs", http.StatusMethodNotAllowed},
+		{"the collection root", "/remote.php/dav/files/alice/", http.StatusMethodNotAllowed},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := h.do(http.MethodPut, tc.path, "alice", alicePassword, "x", nil)
+			if resp.StatusCode != tc.want {
+				t.Errorf("status = %d, want %d", resp.StatusCode, tc.want)
+			}
+			resp.Body.Close()
+		})
+	}
+}
+
+func TestPutEnforcesQuota(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	alice, _ := h.db.UserByName(ctx, "alice")
+	// alice already holds 36 bytes, so allow only a little more.
+	if _, err := h.db.ExecContext(ctx, `UPDATE users SET quota = ? WHERE id = ?`, 50, alice.ID); err != nil {
+		t.Fatalf("set quota: %v", err)
+	}
+
+	resp := h.do(http.MethodPut, "/remote.php/dav/files/alice/small.txt",
+		"alice", alicePassword, "0123456789", nil)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("within quota: status = %d, want 201", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp = h.do(http.MethodPut, "/remote.php/dav/files/alice/big.txt",
+		"alice", alicePassword, strings.Repeat("x", 500), nil)
+	if resp.StatusCode != http.StatusInsufficientStorage {
+		t.Fatalf("over quota: status = %d, want 507", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// A rejected upload must leave nothing behind, not even a partial file.
+	if _, err := os.Stat(filepath.Join(h.homes["alice"], "big.txt")); !os.IsNotExist(err) {
+		t.Error("an over-quota upload left a file on disk")
+	}
+}
+
+func TestMkcolAndDelete(t *testing.T) {
+	h := newHarness(t)
+
+	resp := h.do("MKCOL", "/remote.php/dav/files/alice/newdir", "alice", alicePassword, "", nil)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("MKCOL: status = %d, want 201", resp.StatusCode)
+	}
+	resp.Body.Close()
+	if info, err := os.Stat(filepath.Join(h.homes["alice"], "newdir")); err != nil || !info.IsDir() {
+		t.Fatalf("directory not created on disk: %v", err)
+	}
+
+	resp = h.do("MKCOL", "/remote.php/dav/files/alice/newdir", "alice", alicePassword, "", nil)
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("MKCOL over an existing directory: status = %d, want 405", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp = h.do("MKCOL", "/remote.php/dav/files/alice/a/b/c", "alice", alicePassword, "", nil)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("MKCOL with a missing parent: status = %d, want 409", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	rootBefore := h.etag(t, "/remote.php/dav/files/alice/")
+	resp = h.do(http.MethodDelete, "/remote.php/dav/files/alice/docs", "alice", alicePassword, "", nil)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("DELETE: status = %d, want 204", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	if _, err := os.Stat(filepath.Join(h.homes["alice"], "docs")); !os.IsNotExist(err) {
+		t.Error("deleted directory still on disk")
+	}
+	if _, err := store.NodeByPath(context.Background(), h.db, aliceID(t, h), "docs/report.txt"); err == nil {
+		t.Error("deleting a directory left its contents in the index")
+	}
+	if h.etag(t, "/remote.php/dav/files/alice/") == rootBefore {
+		t.Error("the root ETag did not change after a delete")
+	}
+}
+
+// TestMovePreservesFileID is the reason file IDs exist. A client that sees a
+// familiar ID at a new path renames locally; a new ID makes it delete and
+// re-download the whole subtree.
+func TestMovePreservesFileID(t *testing.T) {
+	h := newHarness(t)
+	before := h.fileID(t, "/remote.php/dav/files/alice/docs/report.txt")
+	if before == "" {
+		t.Fatal("no file ID before the move")
+	}
+
+	resp := h.do("MOVE", "/remote.php/dav/files/alice/docs/report.txt",
+		"alice", alicePassword, "", map[string]string{
+			"Destination": h.http.URL + "/remote.php/dav/files/alice/renamed.txt",
+		})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("MOVE: status = %d, want 201", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	if after := h.fileID(t, "/remote.php/dav/files/alice/renamed.txt"); after != before {
+		t.Errorf("file ID changed across a move: %q then %q", before, after)
+	}
+	if got, err := os.ReadFile(filepath.Join(h.homes["alice"], "renamed.txt")); err != nil {
+		t.Errorf("moved file not on disk: %v", err)
+	} else if string(got) != "quarterly report" {
+		t.Errorf("moved file content = %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(h.homes["alice"], "docs", "report.txt")); !os.IsNotExist(err) {
+		t.Error("the source still exists after a move")
+	}
+}
+
+// TestMoveDirectoryKeepsDescendantIDs: renaming a folder must not look like
+// deleting and recreating everything inside it.
+func TestMoveDirectoryKeepsDescendantIDs(t *testing.T) {
+	h := newHarness(t)
+	deepBefore := h.fileID(t, "/remote.php/dav/files/alice/docs/nested/deep.txt")
+
+	resp := h.do("MOVE", "/remote.php/dav/files/alice/docs",
+		"alice", alicePassword, "", map[string]string{
+			"Destination": h.http.URL + "/remote.php/dav/files/alice/archive",
+		})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("MOVE: status = %d, want 201", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	after := h.fileID(t, "/remote.php/dav/files/alice/archive/nested/deep.txt")
+	if after != deepBefore {
+		t.Errorf("descendant file ID changed across a directory move: %q then %q", deepBefore, after)
+	}
+	// The old paths must be gone from the index, not merely shadowed.
+	if _, err := store.NodeByPath(context.Background(), h.db, aliceID(t, h), "docs/nested/deep.txt"); err == nil {
+		t.Error("the old path is still indexed after a move")
+	}
+}
+
+func TestMoveOverwriteRules(t *testing.T) {
+	h := newHarness(t)
+	dst := h.http.URL + "/remote.php/dav/files/alice/hello.txt"
+
+	resp := h.do("MOVE", "/remote.php/dav/files/alice/docs/report.txt",
+		"alice", alicePassword, "", map[string]string{"Destination": dst, "Overwrite": "F"})
+	if resp.StatusCode != http.StatusPreconditionFailed {
+		t.Errorf("Overwrite: F onto an existing file: status = %d, want 412", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Overwrite defaults to T, and replacing is a 204 rather than a 201.
+	resp = h.do("MOVE", "/remote.php/dav/files/alice/docs/report.txt",
+		"alice", alicePassword, "", map[string]string{"Destination": dst})
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("overwriting move: status = %d, want 204", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestCopyDuplicatesTree(t *testing.T) {
+	h := newHarness(t)
+
+	resp := h.do("COPY", "/remote.php/dav/files/alice/docs", "alice", alicePassword, "",
+		map[string]string{"Destination": h.http.URL + "/remote.php/dav/files/alice/docs-copy"})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("COPY: status = %d, want 201", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	got, err := os.ReadFile(filepath.Join(h.homes["alice"], "docs-copy", "nested", "deep.txt"))
+	if err != nil || string(got) != "deep" {
+		t.Fatalf("copied file = %q, %v", got, err)
+	}
+	// The original must still be there; COPY is not MOVE.
+	if _, err := os.Stat(filepath.Join(h.homes["alice"], "docs", "nested", "deep.txt")); err != nil {
+		t.Errorf("COPY removed the source: %v", err)
+	}
+	// A copy is new content, so it gets new IDs rather than sharing the
+	// originals'.
+	if h.fileID(t, "/remote.php/dav/files/alice/docs-copy/nested/deep.txt") ==
+		h.fileID(t, "/remote.php/dav/files/alice/docs/nested/deep.txt") {
+		t.Error("a copied file shares its file ID with the original")
+	}
+}
+
+// TestWritesLeaveNoPartialFiles: uploads land through a temporary file, and
+// nothing should ever observe one - not a client, not somebody on SMB.
+func TestWritesLeaveNoPartialFiles(t *testing.T) {
+	h := newHarness(t)
+	for i := range 5 {
+		resp := h.do(http.MethodPut,
+			"/remote.php/dav/files/alice/tmp"+strconv.Itoa(i)+".bin",
+			"alice", alicePassword, strings.Repeat("x", 1000), nil)
+		resp.Body.Close()
+	}
+	// One deliberate failure, to check the cleanup path too.
+	resp := h.do(http.MethodPut, "/remote.php/dav/files/alice/bad.txt",
+		"alice", alicePassword, "content", map[string]string{"OC-Checksum": "SHA1:" + strings.Repeat("0", 40)})
+	resp.Body.Close()
+
+	entries, err := os.ReadDir(h.homes["alice"])
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".mirage-tmp-") {
+			t.Errorf("a temporary file was left behind: %s", e.Name())
+		}
+	}
+	if _, err := os.Stat(filepath.Join(h.homes["alice"], "bad.txt")); !os.IsNotExist(err) {
+		t.Error("a failed upload left the destination file behind")
+	}
+}
+
+// TestWritesCannotEscapeTheAccount is the isolation guarantee applied to the
+// write path, where a mistake would be far worse than a read leak.
+func TestWritesCannotEscapeTheAccount(t *testing.T) {
+	h := newHarness(t)
+
+	t.Run("PUT into another account", func(t *testing.T) {
+		resp := h.do(http.MethodPut, "/remote.php/dav/files/bob/planted.txt",
+			"alice", alicePassword, "alice was here", nil)
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("status = %d, want 404", resp.StatusCode)
+		}
+		resp.Body.Close()
+		if _, err := os.Stat(filepath.Join(h.homes["bob"], "planted.txt")); !os.IsNotExist(err) {
+			t.Fatal("alice wrote a file into bob's home directory")
+		}
+	})
+
+	t.Run("MOVE with a destination in another account", func(t *testing.T) {
+		resp := h.do("MOVE", "/remote.php/dav/files/alice/hello.txt",
+			"alice", alicePassword, "", map[string]string{
+				"Destination": h.http.URL + "/remote.php/dav/files/bob/stolen.txt",
+			})
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("status = %d, want 400", resp.StatusCode)
+		}
+		resp.Body.Close()
+		if _, err := os.Stat(filepath.Join(h.homes["bob"], "stolen.txt")); !os.IsNotExist(err) {
+			t.Fatal("a move placed a file into bob's home directory")
+		}
+	})
+
+	t.Run("MOVE with a traversing destination", func(t *testing.T) {
+		resp := h.do("MOVE", "/remote.php/dav/files/alice/hello.txt",
+			"alice", alicePassword, "", map[string]string{
+				"Destination": h.http.URL + "/remote.php/dav/files/alice/..%2f..%2fescaped.txt",
+			})
+		if resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusNoContent {
+			t.Errorf("a traversing destination was accepted: status = %d", resp.StatusCode)
+		}
+		resp.Body.Close()
+	})
+
+	t.Run("DELETE in another account", func(t *testing.T) {
+		resp := h.do(http.MethodDelete, "/remote.php/dav/files/bob/secret.txt",
+			"alice", alicePassword, "", nil)
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("status = %d, want 404", resp.StatusCode)
+		}
+		resp.Body.Close()
+		if _, err := os.Stat(filepath.Join(h.homes["bob"], "secret.txt")); err != nil {
+			t.Fatalf("alice deleted a file from bob's home directory: %v", err)
+		}
+	})
+}
+
+func TestProppatchIsRefusedCleanly(t *testing.T) {
+	h := newHarness(t)
+	body := `<?xml version="1.0"?><d:propertyupdate xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+	  <d:set><d:prop><oc:favorite>1</oc:favorite></d:prop></d:set></d:propertyupdate>`
+	resp := h.do("PROPPATCH", "/remote.php/dav/files/alice/hello.txt",
+		"alice", alicePassword, body, nil)
+	if resp.StatusCode != http.StatusMultiStatus {
+		t.Fatalf("status = %d, want 207", resp.StatusCode)
+	}
+	if got := readBody(t, resp); !strings.Contains(got, "403 Forbidden") {
+		t.Errorf("PROPPATCH did not report the property as forbidden; got:\n%s", got)
 	}
 }
 

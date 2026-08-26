@@ -38,6 +38,10 @@ type Service struct {
 type Features struct {
 	Trashbin   bool
 	Versioning bool
+	// Chunking advertises the chunked upload protocol. With it off, clients
+	// upload even large files with a single PUT - slower to resume, but it
+	// works; with it on but unimplemented, every large upload would fail.
+	Chunking bool
 }
 
 // NewService builds the OCS service. advertisedVersion is the Nextcloud version
@@ -137,8 +141,9 @@ type bruteforce struct {
 
 type davCaps struct {
 	// Chunking "1.0" means the chunked upload v2 protocol. The value is a
-	// protocol marker, not a version of the server.
-	Chunking string `xml:"chunking" json:"chunking"`
+	// protocol marker, not a version of the server. Omitted when unsupported,
+	// so clients fall back to a plain PUT.
+	Chunking string `xml:"chunking,omitempty" json:"chunking,omitempty"`
 }
 
 type filesCaps struct {
@@ -163,9 +168,9 @@ func (s *Service) Capabilities(v Version) http.HandlerFunc {
 					WebDAVRoot:   "remote.php/webdav",
 					Bruteforce:   bruteforce{Delay: 0},
 				},
-				DAV: davCaps{Chunking: "1.0"},
+				DAV: davCaps{Chunking: chunkingValue(s.features.Chunking)},
 				Files: filesCaps{
-					BigFileChunking: true,
+					BigFileChunking: s.features.Chunking,
 					Undelete:        s.features.Trashbin,
 					Versioning:      s.features.Versioning,
 				},
@@ -196,6 +201,14 @@ type quota struct {
 	Total    int64   `xml:"total" json:"total"`
 	Relative float64 `xml:"relative" json:"relative"`
 	Quota    int64   `xml:"quota" json:"quota"`
+}
+
+// chunkingValue renders the dav.chunking capability.
+func chunkingValue(enabled bool) string {
+	if enabled {
+		return "1.0"
+	}
+	return ""
 }
 
 // quotaUnlimited is the sentinel Nextcloud uses for an account with no limit.
