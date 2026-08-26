@@ -151,3 +151,7 @@ wrong before it turns into a permissions problem mid-sync.
 go test ./...
 go run ./cmd/mirage doctor -config ./local.yaml
 ```
+
+## License
+
+[MIT](LICENSE).
