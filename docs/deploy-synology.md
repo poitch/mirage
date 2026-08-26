@@ -154,7 +154,18 @@ cd /volume1/docker/mirage && sudo docker compose up -d
 ```
 
 For the Tailscale variant, use `deploy/docker-compose.tailscale.yml` instead and
-follow the setup notes at the top of that file.
+follow the setup notes at the top of that file. Two things to know before you
+start it:
+
+The URL is **https**, not http. `tailscale serve` terminates TLS with a
+certificate Tailscale issues for the ts.net name, so `external_url` must read
+`https://mirage.<your-tailnet>.ts.net`. That value is baked into the pairing
+URLs handed to clients, so a mismatch pairs and then hangs.
+
+Auth keys expire, and so do the nodes authenticated with one. Unless you turn
+off key expiry for the node — or run it tagged — the NAS quietly leaves the
+tailnet months later and every client stops syncing with nothing obviously
+wrong. The compose file explains both fixes.
 
 ### 6. Check it
 

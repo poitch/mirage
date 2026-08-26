@@ -1,27 +1,43 @@
 # Mirage on a Synology, reachable over your tailnet at
-# https://mirage.<your-tailnet>.ts.net with a real certificate and no
-# reverse proxy, port forward, or certificate renewal to manage.
+# https://mirage.<your-tailnet>.ts.net with a real certificate and no reverse
+# proxy, port forward, or certificate renewal to manage.
 #
-# This is `tailscale serve`, not `funnel`: the server is reachable only by
-# devices on your tailnet, which is what you want for family access.
+# Note the scheme is https, not http: `tailscale serve` terminates TLS with a
+# certificate Tailscale issues for the ts.net name. That is the URL clients and
+# external_url must use.
+#
+# This is `serve`, not `funnel`: reachable only from your tailnet, which is what
+# you want for family access. Nothing is exposed to the public internet.
 #
 # Setup:
 #   1. In the Tailscale admin console, enable MagicDNS and HTTPS certificates.
 #      Serve cannot issue a certificate without both.
-#   2. Generate a reusable auth key and put it in a .env file beside this one:
+#
+#   2. Generate a reusable auth key and put it in a .env file beside this one,
+#      along with a password for the admin page:
 #        TS_AUTHKEY=tskey-auth-...
-#   3. Copy mirage.example.yaml to the config directory and edit it. The one
-#      setting that must match this file is:
+#        MIRAGE_ADMIN_PASSWORD=something-long-and-random
+#
+#      Then read the note on key expiry under TS_EXTRA_ARGS below. Left alone,
+#      this node drops off your tailnet when the key expires and sync stops
+#      working months later for no visible reason.
+#
+#   3. Copy mirage.example.yaml to the config directory. Two settings must
+#      agree with this file:
 #        server:
 #          listen: "127.0.0.1:8080"
 #          external_url: "https://mirage.<your-tailnet>.ts.net"
+#
+#      listen binds to loopback because the only way in is through the sidecar.
 #      external_url is baked into the pairing URLs handed to clients, so it has
-#      to be the name they actually resolve. Getting it wrong pairs and hangs.
+#      to be the name they actually resolve; getting it wrong pairs and hangs.
+#      The file lists no accounts - those are added from the admin page.
+#
 #   4. docker compose -f docker-compose.tailscale.yml up -d
 #   5. docker compose -f docker-compose.tailscale.yml exec mirage mirage doctor
+#   6. Open https://mirage.<your-tailnet>.ts.net/admin and add accounts.
 #
-# Family members install the Nextcloud client and enter the ts.net URL. They
-# need to be on the tailnet; nothing is exposed to the public internet.
+# Family members install the Nextcloud client and enter the same ts.net URL.
 
 services:
   tailscale:
@@ -36,7 +52,19 @@ services:
       # Synology's Container Manager does not always grant.
       TS_USERSPACE: "true"
       TS_SERVE_CONFIG: /config/serve.json
-      TS_EXTRA_ARGS: --advertise-tags=tag:mirage
+      # Auth keys expire, and so do the nodes authenticated with one. When that
+      # happens the NAS silently leaves the tailnet and every client stops
+      # syncing, months after a setup that appeared to work. Pick one fix:
+      #
+      #   - Simplest: after the node first appears in the Tailscale admin
+      #     console, open it and turn off key expiry.
+      #
+      #   - Tidier: run it as a tagged node, which never expires. Define
+      #     tag:mirage in your tailnet policy file first and issue the auth key
+      #     for that tag, then uncomment the line below. Enabling it without
+      #     doing both makes the container fail to start.
+      #
+      # TS_EXTRA_ARGS: --advertise-tags=tag:mirage
     volumes:
       - /volume1/docker/mirage/tailscale:/var/lib/tailscale
       - ./tailscale-serve.json:/config/serve.json:ro
