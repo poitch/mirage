@@ -128,6 +128,15 @@ CREATE INDEX idx_sync_log_user_at ON sync_log(user_id, at);
 	`
 ALTER TABLE login_flows ADD COLUMN user_agent TEXT NOT NULL DEFAULT '';
 `,
+	// 3: server-wide settings. Currently just the instance ID, which forms part
+	// of the oc:id clients use to identify a file, and so must stay stable for
+	// the life of the installation.
+	`
+CREATE TABLE settings (
+    key   TEXT NOT NULL PRIMARY KEY,
+    value TEXT NOT NULL
+);
+`,
 }
 
 // migrate applies any migrations the database has not yet seen.

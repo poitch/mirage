@@ -27,6 +27,7 @@ Usage:
 Commands:
   serve      Run the server
   doctor     Check the config and the health of each user's storage
+  scan       Rebuild the file index from disk
   user       Inspect accounts and manage credentials
   version    Print the version
 
@@ -56,6 +57,8 @@ func run() error {
 		return cmdServe(args)
 	case "doctor":
 		return cmdDoctor(args)
+	case "scan":
+		return cmdScan(args)
 	case "user":
 		return cmdUser(args)
 	case "version":
@@ -156,7 +159,7 @@ func cmdServe(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	srv, err := server.New(cfg, db, log)
+	srv, err := server.New(ctx, cfg, db, log)
 	if err != nil {
 		return err
 	}

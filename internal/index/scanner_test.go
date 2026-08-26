@@ -1,0 +1,263 @@
+package index
+
+import (
+	"context"
+	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/poitch/mirage/internal/fsx"
+	"github.com/poitch/mirage/internal/store"
+)
+
+type fixture struct {
+	scanner *Scanner
+	db      *store.DB
+	user    store.User
+	home    string
+}
+
+func newFixture(t *testing.T) *fixture {
+	t.Helper()
+	ctx := context.Background()
+
+	home := filepath.Join(t.TempDir(), "alice")
+	mustMkdirAll(t, filepath.Join(home, "docs", "nested"))
+	mustWrite(t, filepath.Join(home, "top.txt"), "top level")
+	mustWrite(t, filepath.Join(home, "docs", "report.txt"), "report")
+	mustWrite(t, filepath.Join(home, "docs", "nested", "deep.txt"), "deep")
+
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	if _, err := db.ReconcileUsers(ctx, []store.UserMapping{
+		{Username: "alice", Home: home, UID: os.Getuid(), GID: os.Getgid()},
+	}); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	user, _ := db.UserByName(ctx, "alice")
+
+	mgr := fsx.NewManager(0o640, 0o750)
+	t.Cleanup(func() { mgr.Close() })
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	return &fixture{scanner: NewScanner(db, mgr, log), db: db, user: user, home: home}
+}
+
+func mustMkdirAll(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+}
+
+func mustWrite(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func (f *fixture) scan(t *testing.T) Stats {
+	t.Helper()
+	stats, err := f.scanner.ScanUser(context.Background(), f.user)
+	if err != nil {
+		t.Fatalf("ScanUser: %v", err)
+	}
+	return stats
+}
+
+func (f *fixture) node(t *testing.T, path string) store.Node {
+	t.Helper()
+	n, err := store.NodeByPath(context.Background(), f.db, f.user.ID, path)
+	if err != nil {
+		t.Fatalf("node %q: %v", path, err)
+	}
+	return n
+}
+
+func TestScanIndexesTree(t *testing.T) {
+	f := newFixture(t)
+	stats := f.scan(t)
+
+	if stats.Files != 3 {
+		t.Errorf("Files = %d, want 3", stats.Files)
+	}
+	if stats.Dirs != 2 {
+		t.Errorf("Dirs = %d, want 2", stats.Dirs)
+	}
+
+	root := f.node(t, ".")
+	if !root.IsDir {
+		t.Error("root should be a directory")
+	}
+	// A directory's size is the total of everything beneath it, which is what
+	// clients show and what quota accounting reads.
+	wantBytes := int64(len("top level") + len("report") + len("deep"))
+	if root.Size != wantBytes {
+		t.Errorf("root size = %d, want %d", root.Size, wantBytes)
+	}
+
+	deep := f.node(t, "docs/nested/deep.txt")
+	if deep.IsDir || deep.Size != 4 {
+		t.Errorf("deep.txt: isDir=%v size=%d, want file of 4 bytes", deep.IsDir, deep.Size)
+	}
+	if deep.ContentType != "text/plain; charset=utf-8" {
+		t.Errorf("content type = %q, want text/plain", deep.ContentType)
+	}
+}
+
+// TestRescanIsIdempotent matters because a periodic rescan runs forever. If it
+// produced new ETags each time, every client would resynchronise on every pass.
+func TestRescanIsIdempotent(t *testing.T) {
+	f := newFixture(t)
+	f.scan(t)
+	before := f.node(t, ".")
+	beforeID := before.ID
+
+	f.scan(t)
+	after := f.node(t, ".")
+
+	if after.ETag != before.ETag {
+		t.Errorf("root ETag changed across an unchanged rescan: %q then %q", before.ETag, after.ETag)
+	}
+	if after.ID != beforeID {
+		t.Errorf("root file ID changed across rescan: %d then %d", beforeID, after.ID)
+	}
+}
+
+// TestChangePropagatesToRoot is the sync-critical property: a client that sees
+// an unchanged root ETag never looks any deeper, so an edit three levels down
+// has to reach the top.
+func TestChangePropagatesToRoot(t *testing.T) {
+	f := newFixture(t)
+	f.scan(t)
+
+	rootBefore := f.node(t, ".").ETag
+	docsBefore := f.node(t, "docs").ETag
+	nestedBefore := f.node(t, "docs/nested").ETag
+
+	mustWrite(t, filepath.Join(f.home, "docs", "nested", "deep.txt"), "deep content, now longer")
+	f.scan(t)
+
+	if f.node(t, "docs/nested").ETag == nestedBefore {
+		t.Error("containing directory ETag did not change")
+	}
+	if f.node(t, "docs").ETag == docsBefore {
+		t.Error("intermediate directory ETag did not change")
+	}
+	if f.node(t, ".").ETag == rootBefore {
+		t.Error("root ETag did not change; clients would never see the edit")
+	}
+}
+
+func TestScanNoticesAddsAndDeletes(t *testing.T) {
+	f := newFixture(t)
+	f.scan(t)
+	rootBefore := f.node(t, ".").ETag
+
+	mustWrite(t, filepath.Join(f.home, "docs", "added.txt"), "new file")
+	f.scan(t)
+	if _, err := store.NodeByPath(context.Background(), f.db, f.user.ID, "docs/added.txt"); err != nil {
+		t.Fatalf("added file not indexed: %v", err)
+	}
+	rootAfterAdd := f.node(t, ".").ETag
+	if rootAfterAdd == rootBefore {
+		t.Error("root ETag unchanged after adding a file")
+	}
+
+	if err := os.Remove(filepath.Join(f.home, "docs", "added.txt")); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	f.scan(t)
+	if _, err := store.NodeByPath(context.Background(), f.db, f.user.ID, "docs/added.txt"); err == nil {
+		t.Error("deleted file is still indexed")
+	}
+	// Removing the file restores the tree to its original shape, so the ETag
+	// should return to its original value too.
+	if f.node(t, ".").ETag != rootBefore {
+		t.Error("root ETag did not return to its original value after the file was removed again")
+	}
+}
+
+func TestScanRemovesDeletedDirectory(t *testing.T) {
+	f := newFixture(t)
+	f.scan(t)
+
+	if err := os.RemoveAll(filepath.Join(f.home, "docs")); err != nil {
+		t.Fatalf("remove docs: %v", err)
+	}
+	f.scan(t)
+
+	for _, p := range []string{"docs", "docs/report.txt", "docs/nested", "docs/nested/deep.txt"} {
+		if _, err := store.NodeByPath(context.Background(), f.db, f.user.ID, p); err == nil {
+			t.Errorf("%q survived deletion of its parent directory", p)
+		}
+	}
+}
+
+// TestFileIDsSurviveRescan protects the identity clients use to tell a rename
+// from a delete-plus-create.
+func TestFileIDsSurviveRescan(t *testing.T) {
+	f := newFixture(t)
+	f.scan(t)
+	before := f.node(t, "docs/report.txt").ID
+
+	mustWrite(t, filepath.Join(f.home, "docs", "report.txt"), "edited report content")
+	f.scan(t)
+
+	after := f.node(t, "docs/report.txt")
+	if after.ID != before {
+		t.Errorf("file ID changed on edit: %d then %d", before, after.ID)
+	}
+	if after.ETag == "" {
+		t.Error("edited file has no ETag")
+	}
+}
+
+// TestUnreadableDirectoryIsNotTreatedAsEmpty is the dangerous case. If a
+// directory that cannot be read were scanned as empty, the scan would delete
+// its indexed contents and every client would then delete the real files.
+func TestUnreadableDirectoryIsNotTreatedAsEmpty(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root: permission bits do not restrict access")
+	}
+	f := newFixture(t)
+	f.scan(t)
+
+	docs := filepath.Join(f.home, "docs")
+	if err := os.Chmod(docs, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(docs, 0o755) })
+
+	stats := f.scan(t)
+	if stats.Skipped == 0 {
+		t.Error("scan did not report skipping the unreadable directory")
+	}
+
+	for _, p := range []string{"docs/report.txt", "docs/nested/deep.txt"} {
+		if _, err := store.NodeByPath(context.Background(), f.db, f.user.ID, p); err != nil {
+			t.Errorf("%q was dropped from the index because its parent could not be read: %v", p, err)
+		}
+	}
+}
+
+func TestUserUsageTracksScan(t *testing.T) {
+	f := newFixture(t)
+	f.scan(t)
+
+	used, err := store.UserUsage(context.Background(), f.db, f.user.ID)
+	if err != nil {
+		t.Fatalf("UserUsage: %v", err)
+	}
+	want := int64(len("top level") + len("report") + len("deep"))
+	if used != want {
+		t.Errorf("usage = %d, want %d", used, want)
+	}
+}

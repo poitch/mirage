@@ -11,6 +11,9 @@ import (
 
 	"github.com/poitch/mirage/internal/auth"
 	"github.com/poitch/mirage/internal/config"
+	"github.com/poitch/mirage/internal/dav"
+	"github.com/poitch/mirage/internal/fsx"
+	"github.com/poitch/mirage/internal/index"
 	"github.com/poitch/mirage/internal/ocs"
 	"github.com/poitch/mirage/internal/store"
 )
@@ -26,12 +29,29 @@ type Server struct {
 	auth      *auth.Authenticator
 	loginFlow *auth.LoginFlow
 	ocs       *ocs.Service
+	storage   *fsx.Manager
+	scanner   *index.Scanner
+	dav       *dav.Handler
 	http      *http.Server
 }
 
 // New builds a Server. It does not begin listening; call Run for that.
-func New(cfg *config.Config, db *store.DB, log *slog.Logger) (*Server, error) {
+func New(ctx context.Context, cfg *config.Config, db *store.DB, log *slog.Logger) (*Server, error) {
 	authenticator := auth.NewAuthenticator(db, log)
+
+	instanceID, err := db.InstanceID(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read instance id: %w", err)
+	}
+
+	storage := fsx.NewManager(cfg.Storage.FileMode.Perm(), cfg.Storage.DirMode.Perm())
+	scanner := index.NewScanner(db, storage, log)
+
+	// Writes arrive in the next milestone. Until then the server says so, in
+	// both the advertised permissions and the methods it accepts, rather than
+	// letting clients discover it by failing.
+	const readOnly = true
+	davHandler := dav.NewHandler(db, storage, log, instanceID, readOnly)
 
 	loginFlow, err := auth.NewLoginFlow(db, authenticator, cfg.Server.ExternalURL, log)
 	if err != nil {
@@ -42,7 +62,10 @@ func New(cfg *config.Config, db *store.DB, log *slog.Logger) (*Server, error) {
 	// announcing them would put controls in the client that then fail.
 	features := ocs.Features{Trashbin: false, Versioning: false}
 
-	ocsService, err := ocs.NewService(cfg.Server.AdvertisedVersion, features, authenticator, db, log, nil)
+	usage := func(ctx context.Context, u store.User) (int64, error) {
+		return store.UserUsage(ctx, db, u.ID)
+	}
+	ocsService, err := ocs.NewService(cfg.Server.AdvertisedVersion, features, authenticator, db, log, usage)
 	if err != nil {
 		return nil, fmt.Errorf("build OCS service: %w", err)
 	}
@@ -50,6 +73,7 @@ func New(cfg *config.Config, db *store.DB, log *slog.Logger) (*Server, error) {
 	s := &Server{
 		cfg: cfg, db: db, log: log,
 		auth: authenticator, loginFlow: loginFlow, ocs: ocsService,
+		storage: storage, scanner: scanner, dav: davHandler,
 	}
 	s.http = &http.Server{
 		Addr:    cfg.Server.Listen,
@@ -85,6 +109,14 @@ func (s *Server) routes() http.Handler {
 
 	// Clients call this when an account is removed, to revoke their own token.
 	mux.Handle("DELETE /ocs/v2.php/core/apppassword", protected(s.ocs.DeleteAppPassword(ocs.V2)))
+
+	// WebDAV. Methods are dispatched inside the handler rather than by the mux
+	// so that PROPFIND and the other extension verbs share one route.
+	mux.Handle("/remote.php/dav/files/{user}/{path...}", protected(s.dav))
+	mux.Handle("/remote.php/dav/files/{user}", protected(s.dav))
+	// The pre-DAV root, still probed by desktop clients during setup.
+	mux.Handle("/remote.php/webdav/{path...}", protected(http.HandlerFunc(s.dav.ServeLegacy)))
+	mux.Handle("/remote.php/webdav", protected(http.HandlerFunc(s.dav.ServeLegacy)))
 
 	// Login Flow v2. The poll endpoint is advertised without the index.php
 	// prefix but clients have historically used both, so both are routed.
@@ -143,7 +175,10 @@ func (s *Server) withRequestLogging(next http.Handler) http.Handler {
 
 // Run serves until ctx is cancelled, then shuts down gracefully.
 func (s *Server) Run(ctx context.Context) error {
+	defer s.storage.Close() //nolint:errcheck // shutting down regardless
+
 	go s.prunePairingSessions(ctx)
+	go s.rescan(ctx)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -166,6 +201,38 @@ func (s *Server) Run(ctx context.Context) error {
 			return fmt.Errorf("shutdown: %w", err)
 		}
 		return nil
+	}
+}
+
+// rescan keeps the index in step with the filesystem.
+//
+// The first pass runs at startup so a server that was down while files changed
+// catches up before clients connect. It runs in the background: a large home
+// directory can take a while, and refusing connections until it finishes would
+// be worse than serving a briefly stale index.
+//
+// Until the filesystem watcher lands, this interval is the only thing that
+// surfaces a file dropped in over SMB, so it is also the sync latency.
+func (s *Server) rescan(ctx context.Context) {
+	if err := s.scanner.ScanAll(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		s.log.Error("initial scan failed", "error", err)
+	}
+
+	if s.cfg.Storage.RescanInterval <= 0 {
+		s.log.Warn("periodic rescan is disabled; changes made outside Mirage will not be seen")
+		return
+	}
+	ticker := time.NewTicker(s.cfg.Storage.RescanInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := s.scanner.ScanAll(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				s.log.Error("rescan failed", "error", err)
+			}
+		}
 	}
 }
 

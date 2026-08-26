@@ -1,0 +1,257 @@
+package dav
+
+import (
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"strings"
+
+	"github.com/poitch/mirage/internal/auth"
+	"github.com/poitch/mirage/internal/fsx"
+	"github.com/poitch/mirage/internal/store"
+)
+
+// FilesPrefix is the WebDAV root for a user's files.
+const FilesPrefix = "/remote.php/dav/files/"
+
+// Handler serves the files WebDAV endpoint.
+type Handler struct {
+	db         *store.DB
+	storage    *fsx.Manager
+	log        *slog.Logger
+	instanceID string
+	// readOnly reflects what the server can currently honour. It drives both
+	// the advertised oc:permissions and which methods are allowed, so the two
+	// can never disagree.
+	readOnly bool
+}
+
+// NewHandler builds the files handler.
+func NewHandler(db *store.DB, storage *fsx.Manager, log *slog.Logger, instanceID string, readOnly bool) *Handler {
+	return &Handler{db: db, storage: storage, log: log, instanceID: instanceID, readOnly: readOnly}
+}
+
+// allowedMethods is the Allow header, and the authority on what is accepted.
+func (h *Handler) allowedMethods() string {
+	if h.readOnly {
+		return "OPTIONS, HEAD, GET, PROPFIND"
+	}
+	return "OPTIONS, HEAD, GET, PUT, DELETE, MKCOL, COPY, MOVE, PROPFIND, PROPPATCH, LOCK, UNLOCK"
+}
+
+// ServeHTTP dispatches a request to /remote.php/dav/files/{user}/..., where
+// the account is named in the path.
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	principal := auth.MustUser(r.Context())
+	h.serve(w, r, principal, r.PathValue("user"), r.PathValue("path"))
+}
+
+// ServeLegacy dispatches a request to /remote.php/webdav/..., the older root
+// that carries no username and always refers to the authenticated account.
+// Desktop clients still probe it during setup.
+func (h *Handler) ServeLegacy(w http.ResponseWriter, r *http.Request) {
+	principal := auth.MustUser(r.Context())
+	h.serve(w, r, principal, principal.Username, r.PathValue("path"))
+}
+
+func (h *Handler) serve(w http.ResponseWriter, r *http.Request, principal store.User, targetUser, rawPath string) {
+	if targetUser != principal.Username {
+		// Answering 404 rather than 403 avoids confirming whether the other
+		// account exists. The warning gives an operator what they need to
+		// diagnose a genuine misconfiguration.
+		h.log.Warn("cross-account request refused",
+			"principal", principal.Username, "target", targetUser, "path", r.URL.Path)
+		http.NotFound(w, r)
+		return
+	}
+
+	cleanPath, err := fsx.CleanPath(rawPath)
+	if err != nil {
+		h.log.Warn("rejected malformed path",
+			"user", principal.Username, "path", rawPath, "error", err)
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+
+	switch r.Method {
+	case "OPTIONS":
+		h.handleOptions(w)
+	case "PROPFIND":
+		h.handlePropfind(w, r, principal, cleanPath)
+	case http.MethodGet, http.MethodHead:
+		h.handleGet(w, r, principal, cleanPath)
+	default:
+		w.Header().Set("Allow", h.allowedMethods())
+		w.Header().Set("DAV", "1, 2, 3")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (h *Handler) handleOptions(w http.ResponseWriter) {
+	w.Header().Set("Allow", h.allowedMethods())
+	// Advertising WebDAV classes 1, 2 and 3 is what tells a client this is a
+	// full WebDAV server rather than a plain HTTP file host.
+	w.Header().Set("DAV", "1, 2, 3")
+	w.Header().Set("MS-Author-Via", "DAV")
+	w.WriteHeader(http.StatusOK)
+}
+
+// parseDepth reads the Depth header.
+//
+// RFC 4918 makes infinity the default, but a missing Depth on a large tree
+// would then walk everything and build an enormous response. Every real client
+// sends the header, so defaulting to 1 costs nothing and removes the footgun.
+func parseDepth(r *http.Request) (depth int, ok bool) {
+	switch strings.TrimSpace(r.Header.Get("Depth")) {
+	case "0":
+		return 0, true
+	case "", "1":
+		return 1, true
+	case "infinity":
+		return -1, true
+	default:
+		return 0, false
+	}
+}
+
+func (h *Handler) handlePropfind(w http.ResponseWriter, r *http.Request, user store.User, path string) {
+	depth, ok := parseDepth(r)
+	if !ok {
+		http.Error(w, "invalid Depth header", http.StatusBadRequest)
+		return
+	}
+
+	names, allProps, err := parsePropfind(r.Body)
+	if err != nil {
+		h.log.Warn("malformed PROPFIND", "user", user.Username, "error", err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if allProps {
+		names = allPropNames
+	}
+
+	node, err := store.NodeByPath(r.Context(), h.db, user.ID, path)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		h.internalError(w, "look up path", err)
+		return
+	}
+
+	usage, err := store.UserUsage(r.Context(), h.db, user.ID)
+	if err != nil {
+		h.internalError(w, "read usage", err)
+		return
+	}
+
+	var children []store.Node
+	switch {
+	case depth == 1 && node.IsDir:
+		if children, err = store.ChildNodes(r.Context(), h.db, node.ID); err != nil {
+			h.internalError(w, "list children", err)
+			return
+		}
+	case depth == -1 && node.IsDir:
+		if children, err = store.SubtreeNodes(r.Context(), h.db, user.ID, path); err != nil {
+			h.internalError(w, "list subtree", err)
+			return
+		}
+	}
+
+	ms := newMultistatus(w)
+	h.writeNode(ms, user, node, usage, names)
+	for _, child := range children {
+		h.writeNode(ms, user, child, usage, names)
+	}
+	if err := ms.close(); err != nil {
+		// The response is already partly written, so this can only be logged.
+		h.log.Warn("could not finish PROPFIND response", "user", user.Username, "error", err)
+	}
+}
+
+func (h *Handler) writeNode(ms *multistatus, user store.User, node store.Node, usage int64, names []PropName) {
+	rc := resourceContext{
+		node: node, user: user,
+		instanceID: h.instanceID, usage: usage, readOnly: h.readOnly,
+	}
+	found, missing := rc.resolveAll(names)
+	ms.writeResponse(h.href(user.Username, node.Path, node.IsDir), found, missing)
+}
+
+// href builds the URL path for an indexed entry.
+//
+// Directories carry a trailing slash: clients use it to tell a collection from
+// a file before they have parsed the resourcetype property.
+func (h *Handler) href(username, path string, isDir bool) string {
+	p := FilesPrefix + username
+	if path != "." && path != "" {
+		p += "/" + path
+	}
+	if isDir && !strings.HasSuffix(p, "/") {
+		p += "/"
+	}
+	// EscapedPath encodes each segment while leaving separators intact.
+	return (&url.URL{Path: p}).EscapedPath()
+}
+
+func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request, user store.User, path string) {
+	node, err := store.NodeByPath(r.Context(), h.db, user.ID, path)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		h.internalError(w, "look up path", err)
+		return
+	}
+	if node.IsDir {
+		w.Header().Set("Allow", h.allowedMethods())
+		http.Error(w, "cannot download a directory", http.StatusMethodNotAllowed)
+		return
+	}
+
+	st, err := h.storage.For(user.ID, user.Home, user.UID, user.GID)
+	if err != nil {
+		h.internalError(w, "open storage", err)
+		return
+	}
+	f, err := st.Open(path)
+	if err != nil {
+		// The index said this file exists but the filesystem disagrees, which
+		// means it was removed out of band since the last scan. That is an
+		// expected race, not a server fault.
+		h.log.Info("indexed file is missing on disk",
+			"user", user.Username, "path", path, "error", err)
+		http.NotFound(w, r)
+		return
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		h.internalError(w, "stat file", err)
+		return
+	}
+
+	// Clients read these back on upload and download to confirm identity.
+	w.Header().Set("ETag", `"`+node.ETag+`"`)
+	w.Header().Set("OC-ETag", `"`+node.ETag+`"`)
+	w.Header().Set("OC-FileId", fmt.Sprintf("%08d%s", node.ID, h.instanceID))
+	if node.ContentType != "" {
+		w.Header().Set("Content-Type", node.ContentType)
+	}
+
+	// ServeContent handles Range, If-Range and If-None-Match, which is what
+	// makes an interrupted download resumable.
+	http.ServeContent(w, r, node.Name, info.ModTime(), f)
+}
+
+func (h *Handler) internalError(w http.ResponseWriter, what string, err error) {
+	h.log.Error("webdav request failed", "operation", what, "error", err)
+	http.Error(w, "internal error", http.StatusInternalServerError)
+}
