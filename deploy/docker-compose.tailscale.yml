@@ -22,8 +22,16 @@
 #      this node drops off your tailnet when the key expires and sync stops
 #      working months later for no visible reason.
 #
-#   3. Copy mirage.example.yaml to the config directory. Two settings must
-#      agree with this file:
+#   3. Copy three files onto the NAS, into /volume1/docker/mirage:
+#        docker-compose.tailscale.yml  (this file)
+#        tailscale-serve.json          (next to it, NOT in config/)
+#        mirage.example.yaml           -> config/mirage.yaml
+#
+#      tailscale-serve.json is bind-mounted from beside this file, so leaving
+#      it behind stops the stack with "Bind mount failed: ... does not exist"
+#      before anything starts.
+#
+#      In config/mirage.yaml, two settings must agree with this file:
 #        server:
 #          listen: "127.0.0.1:8080"
 #          external_url: "https://mirage.<your-tailnet>.ts.net"

@@ -144,18 +144,36 @@ MIRAGE_ADMIN_PASSWORD=something-long-and-random
 The compose file refuses to start without it. Choose something real: this page
 can repoint any account at any directory on the NAS.
 
-### 5. Start it
+### 5. Copy the deployment files across
 
-Copy `deploy/docker-compose.yml` to the NAS. In Container Manager: *Project →
-Create*, point it at the folder holding the compose file. Or over SSH:
+For the plain stack, one file:
+
+```
+deploy/docker-compose.yml   ->  /volume1/docker/mirage/docker-compose.yml
+```
+
+For the Tailscale stack, two — the serve configuration is bind-mounted from
+beside the compose file, and leaving it behind stops the stack with
+`Bind mount failed: ... does not exist` before anything starts:
+
+```
+deploy/docker-compose.tailscale.yml  ->  /volume1/docker/mirage/docker-compose.yml
+deploy/tailscale-serve.json          ->  /volume1/docker/mirage/tailscale-serve.json
+```
+
+Note that `tailscale-serve.json` sits beside the compose file, not in `config/`.
+
+### 6. Start it
+
+In Container Manager: *Project → Create*, point it at the folder holding the
+compose file. Or over SSH:
 
 ```
 cd /volume1/docker/mirage && sudo docker compose up -d
 ```
 
-For the Tailscale variant, use `deploy/docker-compose.tailscale.yml` instead and
-follow the setup notes at the top of that file. Two things to know before you
-start it:
+The Tailscale variant needs the extra file listed above. Two more things to know
+before starting it:
 
 The URL is **https**, not http. `tailscale serve` terminates TLS with a
 certificate Tailscale issues for the ts.net name, so `external_url` must read
@@ -168,7 +186,7 @@ tailnet months later and every client stops syncing with nothing obviously
 wrong. The compose file explains both fixes, including the policy-file entry a
 tag needs before an auth key can be issued for it.
 
-### 6. Check it
+### 7. Check it
 
 Open `/admin` on your `external_url` and sign in. Add an account for each
 person: a username, the directory backing it, and the uid/gid from step 2. The
@@ -185,7 +203,7 @@ The same checks are available from the command line:
 sudo docker compose exec mirage mirage doctor
 ```
 
-### 7. Watch the first startup
+### 8. Watch the first startup
 
 ```
 sudo docker compose logs -f mirage
