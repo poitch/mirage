@@ -9,3 +9,17 @@ mirage.yaml
 
 # Local development scratch
 .local/
+
+# Editor and OS artefacts. Vim swap files in particular embed the editing
+# user, their hostname and their home path, so a committed one leaks all
+# three - which is exactly what happened before this line existed.
+*.swp
+*.swo
+*.swn
+*~
+*.bak
+*.orig
+*.rej
+.DS_Store
+.idea/
+.vscode/
