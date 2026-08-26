@@ -165,7 +165,8 @@ URLs handed to clients, so a mismatch pairs and then hangs.
 Auth keys expire, and so do the nodes authenticated with one. Unless you turn
 off key expiry for the node — or run it tagged — the NAS quietly leaves the
 tailnet months later and every client stops syncing with nothing obviously
-wrong. The compose file explains both fixes.
+wrong. The compose file explains both fixes, including the policy-file entry a
+tag needs before an auth key can be issued for it.
 
 ### 6. Check it
 

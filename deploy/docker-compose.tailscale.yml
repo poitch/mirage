@@ -59,12 +59,24 @@ services:
       #   - Simplest: after the node first appears in the Tailscale admin
       #     console, open it and turn off key expiry.
       #
-      #   - Tidier: run it as a tagged node, which never expires. Define
-      #     tag:mirage in your tailnet policy file first and issue the auth key
-      #     for that tag, then uncomment the line below. Enabling it without
-      #     doing both makes the container fail to start.
+      #   - Tidier: run it as a tagged node, which never expires. The tag name
+      #     is yours to choose; it just has to exist before it can be used.
+      #     In the tailnet policy file:
       #
-      # TS_EXTRA_ARGS: --advertise-tags=tag:mirage
+      #       "tagOwners": { "tag:family": ["autogroup:admin"] }
+      #
+      #     Then issue the auth key with that tag selected, and uncomment the
+      #     line below with the same name. Enabling it without both steps makes
+      #     the container fail to start rather than fall back.
+      #
+      #     A tagged node is owned by the tag rather than by you, so if your
+      #     policy file is not the default allow-all, it needs a rule letting
+      #     the people you are sharing with reach it - for example:
+      #
+      #       {"action": "accept", "src": ["autogroup:member"],
+      #        "dst": ["tag:family:443"]}
+      #
+      # TS_EXTRA_ARGS: --advertise-tags=tag:family
     volumes:
       - /volume1/docker/mirage/tailscale:/var/lib/tailscale
       - ./tailscale-serve.json:/config/serve.json:ro
