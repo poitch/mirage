@@ -29,7 +29,7 @@ Early development. Milestone progress:
 - [x] **M1** — client pairing: `status.php`, capabilities, Login Flow v2
 - [x] **M2** — read-only sync: PROPFIND/GET, file index, ETag propagation
 - [x] **M3** — bidirectional sync: PUT/MKCOL/DELETE/MOVE/COPY, UID/GID stamping
-- [ ] **M4** — chunked upload for large files
+- [x] **M4** — chunked upload for large files
 - [ ] **M5** — out-of-band changes: watcher, rescan, rename detection
 - [ ] **M6** — instant sync via notify_push
 - [ ] **M7** — trashbin, versions, previews
@@ -59,9 +59,8 @@ Sync is bidirectional as of M3: create, edit, rename and delete on a client and
 it reaches the NAS, and the reverse. Files land owned by the mapped NAS user, so
 they stay usable over SMB.
 
-Chunked upload arrives in M4. Until then Mirage does not advertise it, so
-clients upload even large files with a single PUT. That works; it just restarts
-from the beginning if the connection drops.
+Large files upload in chunks, so an interrupted transfer resumes from what
+already arrived rather than starting over.
 
 Either run it directly:
 

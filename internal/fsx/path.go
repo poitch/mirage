@@ -66,10 +66,17 @@ func IsRoot(cleaned string) bool { return cleaned == RootPath }
 // the share over SMB.
 const tempPrefix = ".mirage-tmp-"
 
+// UploadDir holds in-progress chunked uploads, one directory per transfer.
+//
+// It lives inside the user's home rather than in server storage for two
+// reasons: that is the volume with room for a partly uploaded 5 GB file, and it
+// keeps one tenant's uploads inside their own directory like everything else.
+const UploadDir = ".mirage-uploads"
+
 // IsInternal reports whether a directory entry is Mirage's own bookkeeping and
 // should be hidden from clients and the index.
 func IsInternal(name string) bool {
-	return strings.HasPrefix(name, tempPrefix)
+	return strings.HasPrefix(name, tempPrefix) || name == UploadDir
 }
 
 // Join appends a child name to a cleaned parent path.

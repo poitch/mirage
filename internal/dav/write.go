@@ -341,7 +341,15 @@ func (h *Handler) handleProppatch(w http.ResponseWriter, r *http.Request, user s
 // parseDestination reads the Destination header and maps it onto a path inside
 // the authenticated user's home.
 func (h *Handler) parseDestination(r *http.Request, user store.User) (string, error) {
-	raw := r.Header.Get("Destination")
+	return ParseDestination(r.Header.Get("Destination"), user.Username)
+}
+
+// ParseDestination maps a Destination header onto a path inside one user's
+// home, refusing anything that points elsewhere.
+//
+// This is the one place a cross-account write could slip in, since the header
+// carries a whole URL that the client chose.
+func ParseDestination(raw, username string) (string, error) {
 	if raw == "" {
 		return "", errors.New("missing Destination header")
 	}
@@ -358,8 +366,7 @@ func (h *Handler) parseDestination(r *http.Request, user store.User) (string, er
 	case strings.HasPrefix(p, FilesPrefix):
 		rest = strings.TrimPrefix(p, FilesPrefix)
 		owner, tail, _ := strings.Cut(rest, "/")
-		if owner != user.Username {
-			// The one place a cross-account write could sneak in.
+		if owner != username {
 			return "", errors.New("destination is outside your files")
 		}
 		rest = tail

@@ -32,6 +32,7 @@ type Server struct {
 	storage   *fsx.Manager
 	scanner   *index.Scanner
 	dav       *dav.Handler
+	uploads   *dav.UploadHandler
 	http      *http.Server
 }
 
@@ -50,6 +51,7 @@ func New(ctx context.Context, cfg *config.Config, db *store.DB, log *slog.Logger
 
 	const readOnly = false
 	davHandler := dav.NewHandler(db, storage, updater, scanner, log, instanceID, readOnly)
+	uploadHandler := dav.NewUploadHandler(db, storage, updater, log, instanceID)
 
 	loginFlow, err := auth.NewLoginFlow(db, authenticator, cfg.Server.ExternalURL, log)
 	if err != nil {
@@ -58,7 +60,7 @@ func New(ctx context.Context, cfg *config.Config, db *store.DB, log *slog.Logger
 
 	// Each capability stays unadvertised until it is implemented: announcing
 	// one early puts a control in the client that then fails.
-	features := ocs.Features{Trashbin: false, Versioning: false, Chunking: false}
+	features := ocs.Features{Trashbin: false, Versioning: false, Chunking: true}
 
 	usage := func(ctx context.Context, u store.User) (int64, error) {
 		return store.UserUsage(ctx, db, u.ID)
@@ -71,7 +73,7 @@ func New(ctx context.Context, cfg *config.Config, db *store.DB, log *slog.Logger
 	s := &Server{
 		cfg: cfg, db: db, log: log,
 		auth: authenticator, loginFlow: loginFlow, ocs: ocsService,
-		storage: storage, scanner: scanner, dav: davHandler,
+		storage: storage, scanner: scanner, dav: davHandler, uploads: uploadHandler,
 	}
 	s.http = &http.Server{
 		Addr:    cfg.Server.Listen,
@@ -115,6 +117,9 @@ func (s *Server) routes() http.Handler {
 	// The pre-DAV root, still probed by desktop clients during setup.
 	mux.Handle("/remote.php/webdav/{path...}", protected(http.HandlerFunc(s.dav.ServeLegacy)))
 	mux.Handle("/remote.php/webdav", protected(http.HandlerFunc(s.dav.ServeLegacy)))
+
+	// Chunked upload, which clients use for anything large.
+	mux.Handle("/remote.php/dav/uploads/{user}/{path...}", protected(s.uploads))
 
 	// Login Flow v2. The poll endpoint is advertised without the index.php
 	// prefix but clients have historically used both, so both are routed.
@@ -176,6 +181,7 @@ func (s *Server) Run(ctx context.Context) error {
 	defer s.storage.Close() //nolint:errcheck // shutting down regardless
 
 	go s.prunePairingSessions(ctx)
+	go s.pruneUploads(ctx)
 	go s.rescan(ctx)
 
 	errCh := make(chan error, 1)
@@ -230,6 +236,54 @@ func (s *Server) rescan(ctx context.Context) {
 			if err := s.scanner.ScanAll(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				s.log.Error("rescan failed", "error", err)
 			}
+		}
+	}
+}
+
+// abandonedUploadTTL is how long an untouched transfer is kept. It matches the
+// window Nextcloud allows, and clients do not expect to resume beyond it.
+const abandonedUploadTTL = 24 * time.Hour
+
+// uploadPruneInterval is how often abandoned transfers are swept.
+const uploadPruneInterval = time.Hour
+
+// pruneUploads discards transfers that were started and never finished.
+//
+// Without this they are permanent: a client that begins a large upload and
+// never returns would leave its chunks occupying the user's disk forever.
+func (s *Server) pruneUploads(ctx context.Context) {
+	sweep := func() {
+		users, err := s.db.ListUsers(ctx)
+		if err != nil {
+			s.log.Error("could not list users to prune uploads", "error", err)
+			return
+		}
+		cutoff := time.Now().Add(-abandonedUploadTTL)
+		for _, u := range users {
+			if u.Disabled {
+				continue
+			}
+			st, err := s.storage.For(u.ID, u.Home, u.UID, u.GID)
+			if err != nil {
+				continue
+			}
+			if n, err := st.PruneUploads(cutoff); err != nil {
+				s.log.Warn("could not prune abandoned uploads", "user", u.Username, "error", err)
+			} else if n > 0 {
+				s.log.Info("discarded abandoned uploads", "user", u.Username, "count", n)
+			}
+		}
+	}
+
+	ticker := time.NewTicker(uploadPruneInterval)
+	defer ticker.Stop()
+	sweep()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sweep()
 		}
 	}
 }
