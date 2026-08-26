@@ -212,6 +212,10 @@ type pageData struct {
 	Form userForm
 	// RunningAsRoot reports whether ownership can actually be applied.
 	RunningAsRoot bool
+	// Mounts lists paths mounted into the container that could hold user
+	// files. Nothing inside a container can discover the host path a mount
+	// came from, so this is shown instead of guessing at one.
+	Mounts []string
 }
 
 type userForm struct {
@@ -248,6 +252,7 @@ func (ad *Admin) newUserForm(w http.ResponseWriter, r *http.Request, sess *sessi
 		Title: "Add an account", CSRF: sess.csrf,
 		Form:          userForm{UID: "1026", GID: "100"},
 		RunningAsRoot: os.Geteuid() == 0,
+		Mounts:        fsx.DataMounts(),
 	})
 }
 
@@ -259,7 +264,7 @@ func (ad *Admin) createUser(w http.ResponseWriter, r *http.Request, sess *sessio
 	if err != nil {
 		ad.render(w, "user_form.html", http.StatusBadRequest, pageData{
 			Title: "Add an account", CSRF: sess.csrf, Error: err.Error(), Form: form,
-			RunningAsRoot: os.Geteuid() == 0,
+			RunningAsRoot: os.Geteuid() == 0, Mounts: fsx.DataMounts(),
 		})
 		return
 	}
@@ -268,7 +273,7 @@ func (ad *Admin) createUser(w http.ResponseWriter, r *http.Request, sess *sessio
 	if err != nil {
 		ad.render(w, "user_form.html", http.StatusBadRequest, pageData{
 			Title: "Add an account", CSRF: sess.csrf, Error: err.Error(), Form: form,
-			RunningAsRoot: os.Geteuid() == 0,
+			RunningAsRoot: os.Geteuid() == 0, Mounts: fsx.DataMounts(),
 		})
 		return
 	}
@@ -302,6 +307,7 @@ func (ad *Admin) editUserForm(w http.ResponseWriter, r *http.Request, sess *sess
 			QuotaGB: quotaToGB(u.Quota),
 		},
 		RunningAsRoot: os.Geteuid() == 0,
+		Mounts:        fsx.DataMounts(),
 	})
 }
 
@@ -322,6 +328,7 @@ func (ad *Admin) updateUser(w http.ResponseWriter, r *http.Request, sess *sessio
 		ad.render(w, "user_form.html", http.StatusBadRequest, pageData{
 			Title: u.Username, CSRF: sess.csrf, Error: err.Error(),
 			User: &u, Probe: &probe, Form: form, RunningAsRoot: os.Geteuid() == 0,
+			Mounts: fsx.DataMounts(),
 		})
 		return
 	}

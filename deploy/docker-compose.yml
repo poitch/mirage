@@ -24,9 +24,12 @@ services:
     volumes:
       - /volume1/docker/mirage/config:/etc/mirage:ro
       - /volume1/docker/mirage/data:/var/lib/mirage
-      # The NAS home directories. Mirage maps each user onto a subdirectory of
-      # this mount; the paths in mirage.yaml are the container-side ones.
-      - /volume1/homes:/volumes/homes
+      # The NAS home directories. Which volume they are on varies by machine,
+      # so set MIRAGE_HOMES_PATH in the .env file if yours is not /volume1.
+      # Mirage maps each account onto a subdirectory of this mount, and the
+      # paths it is given are the container-side ones - so a home on
+      # /volume2/homes/alice is still written as /volumes/homes/alice.
+      - ${MIRAGE_HOMES_PATH:-/volume1/homes}:/volumes/homes
 
     environment:
       TZ: Etc/UTC

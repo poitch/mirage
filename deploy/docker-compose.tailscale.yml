@@ -132,7 +132,7 @@ services:
     volumes:
       - /volume1/docker/mirage/config:/etc/mirage:ro
       - /volume1/docker/mirage/data:/var/lib/mirage
-      - /volume1/homes:/volumes/homes
+      - ${MIRAGE_HOMES_PATH:-/volume1/homes}:/volumes/homes
 
     environment:
       TZ: Etc/UTC

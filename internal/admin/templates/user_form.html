@@ -37,13 +37,16 @@
 
       <label for="home">Directory</label>
       <p class="hint">
-        The path <em>inside the container</em>. The compose file mounts
-        <code>/volume1/homes</code> at <code>/volumes/homes</code>, so
-        <code>/volume1/homes/alice</code> is written here as
-        <code>/volumes/homes/alice</code>. It must already exist.
+        The path <em>inside the container</em>, which is not the path on the NAS:
+        the compose file decides how NAS directories appear here. The directory
+        must already exist.
+        {{ if .Mounts }}
+          <br>Mounted from the NAS:
+          {{ range .Mounts }}<code>{{ . }}</code> {{ end }}
+        {{ end }}
       </p>
       <input id="home" name="home" class="mono" value="{{ .Form.Home }}"
-             placeholder="/volumes/homes/alice"
+             placeholder="{{ with .Mounts }}{{ index . 0 }}/username{{ else }}/volumes/homes/username{{ end }}"
              autocapitalize="none" autocorrect="off" spellcheck="false" required>
 
       <div class="row">

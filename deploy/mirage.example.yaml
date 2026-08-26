@@ -39,9 +39,10 @@ storage:
 # confusing.
 #
 # users:
-#   # `home` is the path *inside the container*: /volume1/homes is mounted at
-#   # /volumes/homes by the compose file, so /volume1/homes/alice appears here
-#   # as /volumes/homes/alice.
+#   # `home` is the path *inside the container*, which is not the path on the
+#   # NAS. The compose file mounts the homes directory - wherever it lives, see
+#   # MIRAGE_HOMES_PATH - at /volumes/homes, so an account on
+#   # /volumeN/homes/alice is written here as /volumes/homes/alice.
 #   #
 #   # `uid` and `gid` must match the NAS account that owns that directory, or
 #   # files Mirage writes will be unreadable over SMB. Find them with `id alice`

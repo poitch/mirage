@@ -105,7 +105,22 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 ### 1. Enable user home directories
 
 In DSM: *Control Panel → User & Group → Advanced → Enable user home service*.
-This is what creates `/volume1/homes/<user>`, which Mirage maps onto.
+This creates `/volumeN/homes/<user>`, which Mirage maps onto.
+
+Check which volume yours is on:
+
+```
+ls -d /volume*/homes
+```
+
+If it is not `/volume1`, set it in the `.env` file beside the compose file:
+
+```
+MIRAGE_HOMES_PATH=/volume2/homes
+```
+
+Whichever volume it is, it appears inside the container as `/volumes/homes`, and
+that container-side path is what you give Mirage.
 
 ### 2. Find each user's uid and gid
 
@@ -135,7 +150,8 @@ the stacks use is a named volume, which Docker creates by itself.
 
 Copy `deploy/mirage.example.yaml` to
 `/volume1/docker/mirage/config/mirage.yaml` and edit it. It does not list
-accounts — those are added from the admin page once the server is up.
+accounts — those are added from the admin page once the server is up, which
+also shows which paths are actually mounted so you need not guess at them.
 
 `external_url` must be the address clients actually reach — it is baked into the
 pairing URLs handed to them, so a wrong value pairs and then hangs.
