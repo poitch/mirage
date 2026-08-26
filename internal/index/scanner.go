@@ -22,10 +22,14 @@ import (
 // index believed. That is what lets files arrive over SMB or DSM File Station
 // and still reach sync clients.
 type Scanner struct {
-	db      *store.DB
-	storage *fsx.Manager
-	log     *slog.Logger
+	db       *store.DB
+	storage  *fsx.Manager
+	log      *slog.Logger
+	notifier Notifier
 }
+
+// SetNotifier attaches a change notifier. Passing nil disables notification.
+func (s *Scanner) SetNotifier(n Notifier) { s.notifier = n }
 
 // NewScanner builds a Scanner.
 func NewScanner(db *store.DB, storage *fsx.Manager, log *slog.Logger) *Scanner {
@@ -59,6 +63,12 @@ func (s *Scanner) ScanUser(ctx context.Context, user store.User) (Stats, error) 
 	// entry at its old path is still there when the new one is reached.
 	stamp := store.Stamp()
 
+	// The root ETag summarises the whole tree, so comparing it before and after
+	// is an exact test of whether this scan found anything. That matters
+	// because a scan runs on a timer: notifying unconditionally would wake
+	// every client every interval for nothing.
+	before := s.rootETag(ctx, user.ID)
+
 	if _, _, err := s.scanDir(ctx, st, user, fsx.RootPath, 0, stamp, &stats); err != nil {
 		return stats, err
 	}
@@ -68,6 +78,10 @@ func (s *Scanner) ScanUser(ctx context.Context, user store.User) (Stats, error) 
 		return stats, fmt.Errorf("prune index for %s: %w", user.Username, err)
 	}
 	stats.Removed = removed
+
+	if after := s.rootETag(ctx, user.ID); after != before && s.notifier != nil {
+		s.notifier.FileChanged(user.ID, nil)
+	}
 
 	stats.Duration = time.Since(start)
 	s.log.Info("scan complete",
@@ -256,6 +270,15 @@ func (s *Scanner) ScanPath(ctx context.Context, user store.User, target string) 
 	unlock := indexLocks.lock(user.ID)
 	defer unlock()
 	return propagate(ctx, s.db, user.ID, parentPath)
+}
+
+// rootETag returns a user's root ETag, or "" if they have not been scanned.
+func (s *Scanner) rootETag(ctx context.Context, userID int64) string {
+	n, err := store.NodeByPath(ctx, s.db, userID, fsx.RootPath)
+	if err != nil {
+		return ""
+	}
+	return n.ETag
 }
 
 // sweepSubtree drops index entries under target that this pass did not touch.

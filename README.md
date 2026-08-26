@@ -31,7 +31,7 @@ Early development. Milestone progress:
 - [x] **M3** — bidirectional sync: PUT/MKCOL/DELETE/MOVE/COPY, UID/GID stamping
 - [x] **M4** — chunked upload for large files
 - [x] **M5** — out-of-band changes: watcher, rescan, rename detection
-- [ ] **M6** — instant sync via notify_push
+- [x] **M6** — instant sync via notify_push
 - [ ] **M7** — trashbin, versions, previews
 - [ ] **M8** — quotas, rate limiting, hardening
 
@@ -89,8 +89,8 @@ Three things to know while testing:
 baked into the pairing and poll URLs handed to the client. A container-internal
 address will pair and then hang.
 
-A file added over SMB or in File Station reaches clients within about a second,
-via the filesystem watcher. `storage.rescan_interval` is the backstop for
+A file added over SMB or in File Station reaches clients within about a second:
+the watcher notices it and the push connection wakes them. `storage.rescan_interval` is the backstop for
 anything the watcher misses — watch limits, dropped events, or changes made
 while Mirage was down.
 

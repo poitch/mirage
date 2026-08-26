@@ -3,6 +3,7 @@ module github.com/poitch/mirage
 go 1.26.6
 
 require (
+	github.com/coder/websocket v1.8.15
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	golang.org/x/crypto v0.55.0

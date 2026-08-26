@@ -22,18 +22,37 @@ import (
 // that never existed. Keying by user keeps unrelated tenants independent.
 var indexLocks keyedMutex
 
+// Notifier is told when a user's files have changed, so that clients can be
+// woken rather than left to discover it on their next poll.
+//
+// Implementations must not block: they are called with the index lock held.
+type Notifier interface {
+	FileChanged(userID int64, fileIDs []int64)
+}
+
 // Updater applies single changes to the index and propagates their effect
 // upwards, without rescanning the tree.
 //
 // A scan is how the index is rebuilt; this is how it keeps up with writes the
 // server itself performs.
 type Updater struct {
-	db *store.DB
+	db       *store.DB
+	notifier Notifier
 }
 
 // NewUpdater builds an Updater.
 func NewUpdater(db *store.DB) *Updater {
 	return &Updater{db: db}
+}
+
+// SetNotifier attaches a change notifier. Passing nil disables notification.
+func (u *Updater) SetNotifier(n Notifier) { u.notifier = n }
+
+// notify reports a change, if anyone is listening.
+func (u *Updater) notify(userID int64, fileIDs ...int64) {
+	if u.notifier != nil {
+		u.notifier.FileChanged(userID, fileIDs)
+	}
 }
 
 // FileWritten records a created or replaced file and returns its indexed form.
@@ -70,6 +89,9 @@ func (u *Updater) FileWritten(ctx context.Context, user store.User, filePath str
 		node, err = store.NodeByID(ctx, tx, user.ID, id)
 		return err
 	})
+	if err == nil {
+		u.notify(user.ID, node.ID)
+	}
 	return node, err
 }
 
@@ -98,6 +120,9 @@ func (u *Updater) DirCreated(ctx context.Context, user store.User, dirPath strin
 		node, err = store.NodeByID(ctx, tx, user.ID, id)
 		return err
 	})
+	if err == nil {
+		u.notify(user.ID, node.ID)
+	}
 	return node, err
 }
 
@@ -106,12 +131,19 @@ func (u *Updater) Removed(ctx context.Context, user store.User, targetPath strin
 	unlock := indexLocks.lock(user.ID)
 	defer unlock()
 
-	return u.db.Tx(ctx, func(tx *sql.Tx) error {
+	err := u.db.Tx(ctx, func(tx *sql.Tx) error {
 		if err := store.DeleteNode(ctx, tx, user.ID, targetPath); err != nil {
 			return err
 		}
 		return propagate(ctx, tx, user.ID, path.Dir(targetPath))
 	})
+	if err == nil {
+		// No file id: the entry is gone, so there is nothing to identify. The
+		// protocol falls back to a bare "something changed", which is all a
+		// client needs to go and look.
+		u.notify(user.ID)
+	}
+	return err
 }
 
 // Moved relocates an entry, keeping its file ID.
@@ -119,7 +151,7 @@ func (u *Updater) Moved(ctx context.Context, user store.User, oldPath, newPath s
 	unlock := indexLocks.lock(user.ID)
 	defer unlock()
 
-	return u.db.Tx(ctx, func(tx *sql.Tx) error {
+	err := u.db.Tx(ctx, func(tx *sql.Tx) error {
 		// Anything already at the destination is being replaced.
 		if err := store.DeleteNode(ctx, tx, user.ID, newPath); err != nil {
 			return err
@@ -138,6 +170,10 @@ func (u *Updater) Moved(ctx context.Context, user store.User, oldPath, newPath s
 		}
 		return propagate(ctx, tx, user.ID, path.Dir(newPath))
 	})
+	if err == nil {
+		u.notify(user.ID)
+	}
+	return err
 }
 
 // ensureParent returns the indexed directory that should contain a path.

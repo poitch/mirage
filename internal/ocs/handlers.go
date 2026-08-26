@@ -24,12 +24,13 @@ type UsageFunc func(ctx context.Context, user store.User) (int64, error)
 
 // Service serves the OCS endpoints and status.php.
 type Service struct {
-	version  ServerVersion
-	auth     *auth.Authenticator
-	db       *store.DB
-	log      *slog.Logger
-	usage    UsageFunc
-	features Features
+	version     ServerVersion
+	auth        *auth.Authenticator
+	db          *store.DB
+	log         *slog.Logger
+	usage       UsageFunc
+	features    Features
+	externalURL string
 }
 
 // Features toggles the capabilities Mirage advertises. Announcing something
@@ -42,11 +43,13 @@ type Features struct {
 	// upload even large files with a single PUT - slower to resume, but it
 	// works; with it on but unimplemented, every large upload would fail.
 	Chunking bool
+	// Push advertises the notify_push websocket.
+	Push bool
 }
 
 // NewService builds the OCS service. advertisedVersion is the Nextcloud version
 // string Mirage claims; usage may be nil, in which case zero is reported.
-func NewService(advertisedVersion string, features Features, a *auth.Authenticator,
+func NewService(advertisedVersion, externalURL string, features Features, a *auth.Authenticator,
 	db *store.DB, log *slog.Logger, usage UsageFunc) (*Service, error) {
 
 	v, err := parseVersion(advertisedVersion)
@@ -58,7 +61,32 @@ func NewService(advertisedVersion string, features Features, a *auth.Authenticat
 	}
 	s := &Service{version: v, auth: a, db: db, log: log, usage: usage}
 	s.features = features
+	s.externalURL = strings.TrimRight(externalURL, "/")
 	return s, nil
+}
+
+// pushCapabilities builds the notify_push advertisement, or nil when push is
+// unavailable.
+func (s *Service) pushCapabilities() *notifyPushCaps {
+	if !s.features.Push {
+		return nil
+	}
+	// The websocket URL must carry the ws scheme matching the page's, or
+	// browsers refuse the upgrade and clients built on them follow suit.
+	ws := s.externalURL
+	switch {
+	case strings.HasPrefix(ws, "https://"):
+		ws = "wss://" + strings.TrimPrefix(ws, "https://")
+	case strings.HasPrefix(ws, "http://"):
+		ws = "ws://" + strings.TrimPrefix(ws, "http://")
+	}
+	return &notifyPushCaps{
+		Type: []string{"files", "activities", "notifications"},
+		Endpoints: notifyPushEndpoint{
+			WebSocket: ws + "/push/ws",
+			PreAuth:   s.externalURL + "/index.php/apps/notify_push/pre_auth",
+		},
+	}
 }
 
 // ServerVersion is the version quadruple clients read.
@@ -121,10 +149,24 @@ type capabilitiesData struct {
 }
 
 type capabilities struct {
-	Core      coreCaps     `xml:"core" json:"core"`
-	DAV       davCaps      `xml:"dav" json:"dav"`
-	Files     filesCaps    `xml:"files" json:"files"`
-	Checksums checksumCaps `xml:"checksums" json:"checksums"`
+	Core       coreCaps        `xml:"core" json:"core"`
+	DAV        davCaps         `xml:"dav" json:"dav"`
+	Files      filesCaps       `xml:"files" json:"files"`
+	Checksums  checksumCaps    `xml:"checksums" json:"checksums"`
+	NotifyPush *notifyPushCaps `xml:"notify_push,omitempty" json:"notify_push,omitempty"`
+}
+
+// notifyPushCaps advertises the push endpoint. Clients discover it here and
+// then open the websocket; omitted entirely when push is unavailable, so a
+// client falls back to polling rather than to a connection that will not open.
+type notifyPushCaps struct {
+	Type      []string           `xml:"type>element" json:"type"`
+	Endpoints notifyPushEndpoint `xml:"endpoints" json:"endpoints"`
+}
+
+type notifyPushEndpoint struct {
+	WebSocket string `xml:"websocket" json:"websocket"`
+	PreAuth   string `xml:"pre_auth" json:"pre_auth"`
 }
 
 type coreCaps struct {
@@ -178,6 +220,7 @@ func (s *Service) Capabilities(v Version) http.HandlerFunc {
 					SupportedTypes:      []string{"SHA1", "MD5"},
 					PreferredUploadType: "SHA1",
 				},
+				NotifyPush: s.pushCapabilities(),
 			},
 		})
 	}

@@ -15,6 +15,7 @@ import (
 	"github.com/poitch/mirage/internal/fsx"
 	"github.com/poitch/mirage/internal/index"
 	"github.com/poitch/mirage/internal/ocs"
+	"github.com/poitch/mirage/internal/push"
 	"github.com/poitch/mirage/internal/store"
 )
 
@@ -34,6 +35,7 @@ type Server struct {
 	watcher   *index.Watcher
 	dav       *dav.Handler
 	uploads   *dav.UploadHandler
+	push      *push.Hub
 	http      *http.Server
 }
 
@@ -51,6 +53,13 @@ func New(ctx context.Context, cfg *config.Config, db *store.DB, log *slog.Logger
 	updater := index.NewUpdater(db)
 	watcher := index.NewWatcher(db, storage, scanner, updater, log)
 
+	// Changes reach connected clients in about a second instead of waiting for
+	// the poll interval. Both the write path and the scanner report through it,
+	// so a change made by a client and one made over SMB look the same.
+	pushHub := push.NewHub(authenticator, db, log)
+	updater.SetNotifier(pushHub)
+	scanner.SetNotifier(pushHub)
+
 	const readOnly = false
 	davHandler := dav.NewHandler(db, storage, updater, scanner, log, instanceID, readOnly)
 	uploadHandler := dav.NewUploadHandler(db, storage, updater, log, instanceID)
@@ -62,12 +71,13 @@ func New(ctx context.Context, cfg *config.Config, db *store.DB, log *slog.Logger
 
 	// Each capability stays unadvertised until it is implemented: announcing
 	// one early puts a control in the client that then fails.
-	features := ocs.Features{Trashbin: false, Versioning: false, Chunking: true}
+	features := ocs.Features{Trashbin: false, Versioning: false, Chunking: true, Push: true}
 
 	usage := func(ctx context.Context, u store.User) (int64, error) {
 		return store.UserUsage(ctx, db, u.ID)
 	}
-	ocsService, err := ocs.NewService(cfg.Server.AdvertisedVersion, features, authenticator, db, log, usage)
+	ocsService, err := ocs.NewService(cfg.Server.AdvertisedVersion, cfg.Server.ExternalURL,
+		features, authenticator, db, log, usage)
 	if err != nil {
 		return nil, fmt.Errorf("build OCS service: %w", err)
 	}
@@ -76,7 +86,7 @@ func New(ctx context.Context, cfg *config.Config, db *store.DB, log *slog.Logger
 		cfg: cfg, db: db, log: log,
 		auth: authenticator, loginFlow: loginFlow, ocs: ocsService,
 		storage: storage, scanner: scanner, watcher: watcher,
-		dav: davHandler, uploads: uploadHandler,
+		dav: davHandler, uploads: uploadHandler, push: pushHub,
 	}
 	s.http = &http.Server{
 		Addr:    cfg.Server.Listen,
@@ -123,6 +133,15 @@ func (s *Server) routes() http.Handler {
 
 	// Chunked upload, which clients use for anything large.
 	mux.Handle("/remote.php/dav/uploads/{user}/{path...}", protected(s.uploads))
+
+	// notify_push. The websocket is not behind the Basic auth middleware: the
+	// protocol authenticates itself after the handshake, and a browser cannot
+	// attach an Authorization header to a websocket upgrade anyway.
+	mux.HandleFunc("GET /push/ws", s.push.ServeWS)
+	mux.Handle("POST /index.php/apps/notify_push/pre_auth", protected(http.HandlerFunc(s.push.PreAuth)))
+	mux.Handle("GET /index.php/apps/notify_push/pre_auth", protected(http.HandlerFunc(s.push.PreAuth)))
+	mux.Handle("POST /apps/notify_push/pre_auth", protected(http.HandlerFunc(s.push.PreAuth)))
+	mux.Handle("GET /apps/notify_push/pre_auth", protected(http.HandlerFunc(s.push.PreAuth)))
 
 	// Login Flow v2. The poll endpoint is advertised without the index.php
 	// prefix but clients have historically used both, so both are routed.
