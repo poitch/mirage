@@ -101,6 +101,10 @@ upload is logged.
 
 ## Running it
 
+**[docs/deploy-synology.md](docs/deploy-synology.md) walks through the NAS
+deployment**, including getting the image there without git and finding the
+right uid/gid.
+
 [`deploy/mirage.example.yaml`](deploy/mirage.example.yaml) is an annotated
 config. For the NAS there are two deployments:
 

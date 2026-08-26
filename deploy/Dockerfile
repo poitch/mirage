@@ -1,15 +1,23 @@
 # syntax=docker/dockerfile:1
 
-FROM golang:1.26-alpine AS build
+# Pinned to the build platform so the toolchain runs natively and cross-compiles
+# to the target, rather than the whole build running under QEMU emulation. This
+# only works because the binary is pure Go with cgo disabled - which is also why
+# the SQLite driver is a pure-Go one.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
+
 WORKDIR /src
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY . .
+
+ARG TARGETOS
+ARG TARGETARCH
 ARG VERSION=dev
-# CGO_ENABLED=0 keeps the binary static. The SQLite driver is pure Go precisely
-# so this works, which is what makes cross-building for a Synology painless.
-RUN CGO_ENABLED=0 go build -trimpath \
-        -ldflags "-s -w -X main.version=${VERSION}" \
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
         -o /out/mirage ./cmd/mirage
 
 FROM alpine:3.21
@@ -21,8 +29,8 @@ COPY --from=build /out/mirage /usr/local/bin/mirage
 # user's NAS uid/gid so DSM File Station and SMB see native ownership, and only
 # root may chown to an arbitrary user. Tenant isolation does not rest on the
 # process user: each account is confined to its own directory by an os.Root
-# handle, which the kernel enforces. The compose file drops every capability
-# except the three this actually needs.
+# handle, which the kernel enforces. The compose files drop every capability
+# except the few this actually needs.
 VOLUME ["/var/lib/mirage"]
 EXPOSE 8080
 

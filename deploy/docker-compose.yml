@@ -10,10 +10,11 @@
 
 services:
   mirage:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile
+    # Pulled, not built: the NAS has no source tree and no git. The image is
+    # published by CI for both linux/amd64 and linux/arm64, and the NAS picks
+    # the one that matches itself.
     image: ghcr.io/poitch/mirage:latest
+    pull_policy: always
     container_name: mirage
     restart: unless-stopped
 
