@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/poitch/mirage/internal/admin"
 	"github.com/poitch/mirage/internal/auth"
 	"github.com/poitch/mirage/internal/config"
 	"github.com/poitch/mirage/internal/dav"
@@ -36,6 +37,7 @@ type Server struct {
 	dav       *dav.Handler
 	uploads   *dav.UploadHandler
 	push      *push.Hub
+	admin     *admin.Admin
 	http      *http.Server
 }
 
@@ -82,11 +84,29 @@ func New(ctx context.Context, cfg *config.Config, db *store.DB, log *slog.Logger
 		return nil, fmt.Errorf("build OCS service: %w", err)
 	}
 
+	// Absent admin credentials leave the page unrouted entirely. An admin page
+	// that appears with a blank password would be worse than none, and this
+	// one can repoint any account at any directory.
+	adminPage, err := admin.New(db, storage, scanner, authenticator, log,
+		cfg.Server.ExternalURL, cfg.ManagesUsers())
+	switch {
+	case errors.Is(err, admin.ErrDisabled):
+		adminPage = nil
+		log.Info("admin page disabled; set " + admin.EnvPassword + " to enable it")
+	case err != nil:
+		return nil, fmt.Errorf("build admin page: %w", err)
+	default:
+		if cfg.ManagesUsers() {
+			log.Warn("admin page is read-only: the config file declares accounts, " +
+				"so it is authoritative; remove the users: section to manage them from the page")
+		}
+	}
+
 	s := &Server{
 		cfg: cfg, db: db, log: log,
 		auth: authenticator, loginFlow: loginFlow, ocs: ocsService,
 		storage: storage, scanner: scanner, watcher: watcher,
-		dav: davHandler, uploads: uploadHandler, push: pushHub,
+		dav: davHandler, uploads: uploadHandler, push: pushHub, admin: adminPage,
 	}
 	s.http = &http.Server{
 		Addr:    cfg.Server.Listen,
@@ -150,6 +170,10 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /index.php/login/v2/poll", s.loginFlow.Poll)
 	mux.HandleFunc("GET /index.php/login/v2/flow/{token}", s.loginFlow.Page)
 	mux.HandleFunc("POST /index.php/login/v2/flow/{token}", s.loginFlow.Page)
+
+	if s.admin != nil {
+		s.admin.Routes(mux)
+	}
 
 	// Nextcloud clients probe undocumented paths and shift between releases.
 	// Logging every unrouted request turns "the client mysteriously fails to

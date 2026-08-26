@@ -32,6 +32,10 @@ services:
     environment:
       TZ: Etc/UTC
       MIRAGE_CONFIG: /etc/mirage/mirage.yaml
+      # Admin page at http://localhost:8080/admin. Without a password set, the
+      # page is not served at all.
+      MIRAGE_ADMIN_USERNAME: admin
+      MIRAGE_ADMIN_PASSWORD: local-dev-password
 
 volumes:
   mirage-dev-index:

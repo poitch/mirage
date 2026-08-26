@@ -10,12 +10,12 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/poitch/mirage/internal/account"
 	"gopkg.in/yaml.v3"
 )
 
@@ -24,8 +24,14 @@ type Config struct {
 	Server   Server   `yaml:"server"`
 	Database Database `yaml:"database"`
 	Storage  Storage  `yaml:"storage"`
-	Users    []User   `yaml:"users"`
+	// Users is optional; see the note on User. An empty list means accounts are
+	// managed through the admin page instead.
+	Users []User `yaml:"users"`
 }
+
+// ManagesUsers reports whether the config file declares the account list. When
+// it does not, nothing is reconciled from it and the database stands alone.
+func (c *Config) ManagesUsers() bool { return len(c.Users) > 0 }
 
 // Server holds HTTP listener settings.
 type Server struct {
@@ -66,6 +72,11 @@ type Storage struct {
 }
 
 // User maps a Mirage account onto a directory on the NAS filesystem.
+//
+// Declaring users here is optional. When the list is empty, accounts are
+// managed entirely through the admin page and the database is authoritative;
+// when it is populated, this file wins and the admin page reflects it but
+// cannot override it. Mixing the two is possible but confusing, so pick one.
 type User struct {
 	Username    string `yaml:"username"`
 	DisplayName string `yaml:"display_name"`
@@ -117,9 +128,6 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// usernameRe matches usernames safe to embed in a WebDAV URL path segment.
-var usernameRe = regexp.MustCompile(`^[A-Za-z0-9._@-]{1,64}$`)
-
 // advertisedVersionRe matches a three-part version such as "31.0.0".
 var advertisedVersionRe = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
 
@@ -155,53 +163,27 @@ func (c *Config) Validate() error {
 	if c.Storage.RescanInterval < 0 {
 		return fmt.Errorf("storage.rescan_interval must not be negative")
 	}
-	if len(c.Users) == 0 {
-		return fmt.Errorf("at least one user must be configured")
-	}
-
-	seenName := make(map[string]bool, len(c.Users))
-	// Keyed by home path so nesting can be checked against every earlier entry.
-	seenHome := make(map[string]string, len(c.Users))
+	// The same rules apply to accounts created through the admin page, so they
+	// live in one place rather than being restated here.
+	seen := make([]account.Mapping, 0, len(c.Users))
 	for i := range c.Users {
 		u := &c.Users[i]
-		if !usernameRe.MatchString(u.Username) {
-			return fmt.Errorf("users[%d]: username %q must match %s", i, u.Username, usernameRe)
+		if err := account.ValidateUsername(u.Username); err != nil {
+			return fmt.Errorf("users[%d]: %w", i, err)
 		}
-		if seenName[u.Username] {
-			return fmt.Errorf("users[%d]: duplicate username %q", i, u.Username)
+		home, err := account.ValidateHome(u.Home)
+		if err != nil {
+			return fmt.Errorf("users[%d] (%s): %w", i, u.Username, err)
 		}
-		seenName[u.Username] = true
+		u.Home = home
+		if err := account.ValidateOwnership(u.UID, u.GID); err != nil {
+			return fmt.Errorf("users[%d] (%s): %w", i, u.Username, err)
+		}
+		if err := account.CheckConflicts(account.Mapping{Username: u.Username, Home: u.Home}, seen); err != nil {
+			return fmt.Errorf("users[%d] (%s): %w", i, u.Username, err)
+		}
+		seen = append(seen, account.Mapping{Username: u.Username, Home: u.Home})
 
-		if !filepath.IsAbs(u.Home) {
-			return fmt.Errorf("users[%d] (%s): home %q must be an absolute path", i, u.Username, u.Home)
-		}
-		u.Home = filepath.Clean(u.Home)
-		// Two users sharing a home would silently break tenant isolation, so
-		// reject it here rather than letting it become a data leak. So would
-		// one home containing another: the outer user would see everything
-		// belonging to the inner one, and os.Root could not prevent it because
-		// nothing would be escaping any directory.
-		for other, otherName := range seenHome {
-			switch {
-			case other == u.Home:
-				return fmt.Errorf("users[%d] (%s): home %q is already used by %q; each user needs a private directory",
-					i, u.Username, u.Home, otherName)
-			case isWithin(u.Home, other):
-				return fmt.Errorf("users[%d] (%s): home %q is inside %q, which belongs to %q; %s would be able to see their files",
-					i, u.Username, u.Home, other, otherName, otherName)
-			case isWithin(other, u.Home):
-				return fmt.Errorf("users[%d] (%s): home %q contains %q, which belongs to %q; %s would be able to see their files",
-					i, u.Username, u.Home, other, otherName, u.Username)
-			}
-		}
-		seenHome[u.Home] = u.Username
-
-		if u.UID < 0 {
-			return fmt.Errorf("users[%d] (%s): uid must not be negative", i, u.Username)
-		}
-		if u.GID < 0 {
-			return fmt.Errorf("users[%d] (%s): gid must not be negative", i, u.Username)
-		}
 		if u.Quota < 0 {
 			return fmt.Errorf("users[%d] (%s): quota must not be negative (use 0 for unlimited)", i, u.Username)
 		}
@@ -253,15 +235,6 @@ func (d Duration) Duration() time.Duration { return time.Duration(d) }
 
 // String renders the duration.
 func (d Duration) String() string { return time.Duration(d).String() }
-
-// isWithin reports whether child lies inside parent. Both must be cleaned
-// absolute paths.
-func isWithin(child, parent string) bool {
-	if parent == child {
-		return true
-	}
-	return strings.HasPrefix(child, strings.TrimSuffix(parent, "/")+"/")
-}
 
 // FileMode is a Unix permission bitmask parsed from an octal string such as
 // "0640". It is a distinct type because YAML's own integer parsing would read

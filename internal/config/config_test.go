@@ -133,6 +133,29 @@ func TestRescanIntervalRejectsUnitlessNumbers(t *testing.T) {
 	}
 }
 
+// TestUsersAreOptional: accounts can be managed entirely through the admin
+// page, so a config that declares none is valid rather than an error.
+func TestUsersAreOptional(t *testing.T) {
+	cfg, err := Load(writeConfig(t,
+		"server:\n  external_url: https://x.example.com\ndatabase:\n  path: /tmp/x.db\n"))
+	if err != nil {
+		t.Fatalf("a config with no users should load: %v", err)
+	}
+	if cfg.ManagesUsers() {
+		t.Error("ManagesUsers should be false when no users are declared")
+	}
+}
+
+func TestManagesUsersWhenDeclared(t *testing.T) {
+	cfg, err := Load(writeConfig(t, validConfig))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.ManagesUsers() {
+		t.Error("ManagesUsers should be true when the config declares users")
+	}
+}
+
 func TestValidationErrors(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -147,14 +170,14 @@ func TestValidationErrors(t *testing.T) {
 		{
 			name:     "duplicate username",
 			body:     strings.Replace(validConfig, "username: bob", "username: alice", 1),
-			wantHint: "duplicate username",
+			wantHint: "already exists",
 		},
 		{
 			// Two users pointing at one directory is a tenant-isolation breach,
 			// so it must fail loudly at startup rather than at request time.
 			name:     "shared home directory",
 			body:     strings.Replace(validConfig, "/volumes/homes/nas_bob", "/volumes/homes/nas_alice", 1),
-			wantHint: "already used by",
+			wantHint: "already uses",
 		},
 		{
 			// So is nesting: the outer user would see the inner user's files,
@@ -162,12 +185,20 @@ func TestValidationErrors(t *testing.T) {
 			// nothing is escaping any directory.
 			name:     "home nested inside another",
 			body:     strings.Replace(validConfig, "/volumes/homes/nas_bob", "/volumes/homes/nas_alice/shared", 1),
-			wantHint: "would be able to see their files",
+			wantHint: "would be able to see these files",
 		},
 		{
 			name:     "home containing another",
 			body:     strings.Replace(validConfig, "home: /volumes/homes/nas_bob", "home: /volumes/homes", 1),
-			wantHint: "would be able to see their files",
+			wantHint: "would be visible here",
+		},
+		{
+			// A username of ".." would land in the WebDAV path as a traversal
+			// segment. The character class permits dots for names like
+			// "first.last", which makes this a member of it by accident.
+			name:     "username made only of dots",
+			body:     strings.Replace(validConfig, "username: alice", `username: ".."`, 1),
+			wantHint: "path segment",
 		},
 		{
 			name:     "relative home",
@@ -178,13 +209,9 @@ func TestValidationErrors(t *testing.T) {
 			// A slash in a username would let it escape its URL path segment.
 			name:     "username with slash",
 			body:     strings.Replace(validConfig, "username: alice", `username: "a/../bob"`, 1),
-			wantHint: "must match",
+			wantHint: "username",
 		},
-		{
-			name:     "no users",
-			body:     "server:\n  external_url: https://x.example.com\ndatabase:\n  path: /tmp/x.db\n",
-			wantHint: "at least one user",
-		},
+
 		{
 			name:     "unknown field",
 			body:     validConfig + "\nbogus_field: 1\n",

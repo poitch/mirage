@@ -1,0 +1,69 @@
+{{ template "head" . }}
+{{ template "nav" . }}
+<main>
+  <h1>Accounts</h1>
+  <p class="sub">Each account maps to a directory on the NAS and syncs it to that person's devices.</p>
+
+  {{ template "banners" . }}
+
+  <div class="card">
+    {{ if .Users }}
+    <table>
+      <thead>
+        <tr>
+          <th>Account</th><th>Directory</th><th>Owner</th><th>Quota</th><th>Status</th><th></th>
+        </tr>
+      </thead>
+      <tbody>
+      {{ range .Users }}
+        <tr>
+          <td>
+            <a href="/admin/users/{{ .ID }}"><strong>{{ .Username }}</strong></a>
+            {{ if ne .DisplayName .Username }}<br><span class="muted">{{ .DisplayName }}</span>{{ end }}
+          </td>
+          <td class="mono">{{ .Home }}</td>
+          <td class="mono">{{ .UID }}:{{ .GID }}</td>
+          <td>{{ if gt .Quota 0 }}{{ bytes .Quota }}{{ else }}<span class="muted">unlimited</span>{{ end }}</td>
+          <td>
+            {{/* Every applicable state is shown, not just the first. An
+                 account can be both missing a password and pointing at a
+                 directory that needs attention, and hiding either behind the
+                 other is how one of them goes unnoticed. */}}
+            {{ $flagged := false }}
+            {{ if .Disabled }}<span class="pill err">disabled</span> {{ $flagged = true }}{{ end }}
+            {{ if not .Probe.OK }}<span class="pill err">storage</span> {{ $flagged = true }}{{ end }}
+            {{ if eq .PasswordHash "" }}<span class="pill warn">no password</span> {{ $flagged = true }}{{ end }}
+            {{ if and .Probe.OK .Probe.Warning }}<span class="pill warn">check</span> {{ $flagged = true }}{{ end }}
+            {{ if not $flagged }}<span class="pill ok">ready</span>{{ end }}
+            {{ if not .Probe.OK }}<br><span class="muted">{{ .Probe.Problem }}</span>{{ end }}
+            {{ if .Probe.Warning }}<br><span class="muted">{{ .Probe.Warning }}</span>{{ end }}
+          </td>
+          <td>
+            <div class="actions">
+              <form method="post" action="/admin/users/{{ .ID }}/scan" style="margin:0">
+                <input type="hidden" name="csrf" value="{{ $.CSRF }}">
+                <button class="secondary" type="submit" title="Reindex this account's files">Scan</button>
+              </form>
+              <form method="post" action="/admin/users/{{ .ID }}/state" style="margin:0">
+                <input type="hidden" name="csrf" value="{{ $.CSRF }}">
+                <input type="hidden" name="action" value="{{ if .Disabled }}enable{{ else }}disable{{ end }}">
+                <button class="secondary" type="submit">{{ if .Disabled }}Enable{{ else }}Disable{{ end }}</button>
+              </form>
+            </div>
+          </td>
+        </tr>
+      {{ end }}
+      </tbody>
+    </table>
+    {{ else }}
+      <p class="muted" style="margin:0">
+        No accounts yet. Add one, then set a password for it and point a
+        Nextcloud client at this server.
+      </p>
+    {{ end }}
+  </div>
+
+  {{ if not .ReadOnly }}
+  <a class="button" href="/admin/users/new">Add an account</a>
+  {{ end }}
+</main>

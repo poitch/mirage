@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/poitch/mirage/internal/config"
 	"github.com/poitch/mirage/internal/fsx"
@@ -47,37 +46,26 @@ func cmdDoctor(args []string) error {
 		fmt.Printf("  home  %s\n", u.Home)
 		fmt.Printf("  owner uid %d gid %d\n", u.UID, u.GID)
 
-		fi, err := os.Stat(u.Home)
+		p := fsx.ProbeHome(u.Home, u.UID, u.GID)
+		if p.OwnerKnown {
+			fmt.Printf("  disk  uid %d gid %d mode %s\n", p.OwnerUID, p.OwnerGID, p.Mode)
+		}
 		switch {
-		case os.IsNotExist(err):
-			fmt.Printf("  FAIL  home does not exist inside the container.\n")
-			fmt.Printf("        Check the bind mount for %s.\n", filepath.Dir(u.Home))
-			problems++
-		case err != nil:
-			fmt.Printf("  FAIL  cannot stat home: %v\n", err)
-			problems++
-		case !fi.IsDir():
-			fmt.Printf("  FAIL  home exists but is not a directory\n")
+		case !p.OK():
+			fmt.Printf("  FAIL  %s\n", p.Problem)
 			problems++
 		default:
-			if uid, gid, ok := fsx.Owner(fi); ok {
-				fmt.Printf("  disk  uid %d gid %d mode %s\n", uid, gid, fi.Mode().Perm())
-				if uid != u.UID || gid != u.GID {
-					// Not fatal: Mirage stamps its configured uid/gid onto what
-					// it writes regardless. But a mismatch usually means the
-					// config was copied from another user's block.
-					fmt.Printf("  WARN  home is owned by %d:%d but config says %d:%d;\n",
-						uid, gid, u.UID, u.GID)
-					fmt.Printf("        new files will not match their own directory\n")
-				}
-			}
-			if err := checkWritable(u.Home); err != nil {
-				fmt.Printf("  FAIL  home is not writable: %v\n", err)
-				problems++
-			} else {
-				fmt.Printf("  ok    readable and writable\n")
-			}
+			fmt.Printf("  ok    readable and writable\n")
 		}
+		if p.Warning != "" {
+			fmt.Printf("  WARN  %s\n", p.Warning)
+		}
+		fmt.Println()
+	}
+
+	if len(cfg.Users) == 0 {
+		fmt.Println("No accounts are declared in the config file.")
+		fmt.Println("They are managed through the admin page; run the server and open /admin.")
 		fmt.Println()
 	}
 
@@ -87,15 +75,4 @@ func cmdDoctor(args []string) error {
 	log.Debug("doctor completed with no problems")
 	fmt.Println("No problems found.")
 	return nil
-}
-
-// checkWritable confirms the directory accepts a create-and-remove cycle.
-func checkWritable(dir string) error {
-	f, err := os.CreateTemp(dir, ".mirage-doctor-*")
-	if err != nil {
-		return err
-	}
-	name := f.Name()
-	f.Close()
-	return os.Remove(name)
 }

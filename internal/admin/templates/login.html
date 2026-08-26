@@ -1,0 +1,23 @@
+{{ template "head" . }}
+<main style="max-width:24rem;margin:12vh auto;padding:0 1.25rem">
+  <h1>Mirage</h1>
+  <p class="sub">Sign in to manage accounts.</p>
+  {{ if .Error }}<p class="banner err">{{ .Error }}</p>{{ end }}
+  <div class="card">
+    <form method="post" action="/admin/login">
+      <label for="username">Username</label>
+      <input id="username" name="username" autocomplete="username"
+             autocapitalize="none" autocorrect="off" spellcheck="false" required autofocus>
+
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+
+      <button type="submit" style="width:100%">Sign in</button>
+    </form>
+  </div>
+  <p class="sub" style="font-size:.82rem">
+    These credentials come from <code>MIRAGE_ADMIN_USERNAME</code> and
+    <code>MIRAGE_ADMIN_PASSWORD</code> on the container. They are separate from
+    the accounts that sync files.
+  </p>
+</main>

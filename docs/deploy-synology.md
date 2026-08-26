@@ -128,12 +128,21 @@ sudo mkdir -p /volume1/docker/mirage/{config,data}
 ### 4. Write the config
 
 Copy `deploy/mirage.example.yaml` to
-`/volume1/docker/mirage/config/mirage.yaml` and edit it. The paths in it are
-paths *inside the container*: the compose file mounts `/volume1/homes` at
-`/volumes/homes`, so `/volume1/homes/alice` is written as `/volumes/homes/alice`.
+`/volume1/docker/mirage/config/mirage.yaml` and edit it. It does not list
+accounts — those are added from the admin page once the server is up.
 
 `external_url` must be the address clients actually reach — it is baked into the
 pairing URLs handed to them, so a wrong value pairs and then hangs.
+
+Then set an admin password in a `.env` file beside the compose file:
+
+```
+MIRAGE_ADMIN_USERNAME=admin
+MIRAGE_ADMIN_PASSWORD=something-long-and-random
+```
+
+The compose file refuses to start without it. Choose something real: this page
+can repoint any account at any directory on the NAS.
 
 ### 5. Start it
 
@@ -149,15 +158,20 @@ follow the setup notes at the top of that file.
 
 ### 6. Check it
 
+Open `/admin` on your `external_url` and sign in. Add an account for each
+person: a username, the directory backing it, and the uid/gid from step 2. The
+page checks the directory as you save it and says so if it is missing, not
+writable, or owned by somebody else — the mapping mistakes that otherwise
+surface as confusing permission errors mid-sync.
+
+Set a password on each account before pointing a client at it; a fresh account
+has none and cannot sign in.
+
+The same checks are available from the command line:
+
 ```
 sudo docker compose exec mirage mirage doctor
-sudo docker compose exec mirage mirage user passwd alice
 ```
-
-`doctor` verifies each home exists inside the container, is writable, and that
-its ownership matches the configured uid/gid. Run it before pointing a client at
-the server; it catches the mapping mistakes that otherwise surface as confusing
-permission errors mid-sync.
 
 ### 7. Watch the first startup
 

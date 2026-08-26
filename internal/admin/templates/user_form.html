@@ -1,0 +1,110 @@
+{{ template "head" . }}
+{{ template "nav" . }}
+<main>
+  <h1>{{ if .User }}{{ .User.Username }}{{ else }}Add an account{{ end }}</h1>
+  <p class="sub">
+    {{ if .User }}Change where this account's files live, or its credentials.
+    {{ else }}Map an account onto a directory that already exists on the NAS.{{ end }}
+  </p>
+
+  {{ template "banners" . }}
+
+  {{ if .Probe }}
+    {{ if not .Probe.OK }}
+      <p class="banner err"><strong>{{ .Probe.Path }}</strong> {{ .Probe.Problem }}.</p>
+    {{ else if .Probe.Warning }}
+      <p class="banner warn"><strong>{{ .Probe.Path }}</strong> is usable. Note that {{ .Probe.Warning }}.</p>
+    {{ else }}
+      <p class="banner ok">
+        <strong>{{ .Probe.Path }}</strong> exists, is writable, and its ownership matches.
+      </p>
+    {{ end }}
+  {{ end }}
+
+  <div class="card">
+    <form method="post" action="{{ if .User }}/admin/users/{{ .User.ID }}{{ else }}/admin/users{{ end }}">
+      <input type="hidden" name="csrf" value="{{ .CSRF }}">
+
+      <label for="username">Username</label>
+      <p class="hint">Used to sign in from the sync client. Letters, digits, dot, underscore, at-sign or hyphen.</p>
+      <input id="username" name="username" value="{{ .Form.Username }}"
+             autocapitalize="none" autocorrect="off" spellcheck="false" required
+             {{ if not .User }}autofocus{{ end }}>
+
+      <label for="display_name">Display name</label>
+      <p class="hint">Optional. Shown in the client; defaults to the username.</p>
+      <input id="display_name" name="display_name" value="{{ .Form.DisplayName }}">
+
+      <label for="home">Directory</label>
+      <p class="hint">
+        The path <em>inside the container</em>. The compose file mounts
+        <code>/volume1/homes</code> at <code>/volumes/homes</code>, so
+        <code>/volume1/homes/alice</code> is written here as
+        <code>/volumes/homes/alice</code>. It must already exist.
+      </p>
+      <input id="home" name="home" class="mono" value="{{ .Form.Home }}"
+             placeholder="/volumes/homes/alice"
+             autocapitalize="none" autocorrect="off" spellcheck="false" required>
+
+      <div class="row">
+        <div>
+          <label for="uid">UID</label>
+          <p class="hint">From <code>id alice</code> on the NAS.</p>
+          <input id="uid" name="uid" class="mono" value="{{ .Form.UID }}" inputmode="numeric" required>
+        </div>
+        <div>
+          <label for="gid">GID</label>
+          <p class="hint">Usually 100 (<code>users</code>).</p>
+          <input id="gid" name="gid" class="mono" value="{{ .Form.GID }}" inputmode="numeric" required>
+        </div>
+      </div>
+
+      <label for="quota_gb">Quota (GB)</label>
+      <p class="hint">Leave blank for unlimited.</p>
+      <input id="quota_gb" name="quota_gb" value="{{ .Form.QuotaGB }}" inputmode="decimal">
+
+      <div class="actions">
+        <button type="submit">{{ if .User }}Save changes{{ else }}Create account{{ end }}</button>
+        <a href="/admin/users" style="color:var(--muted);font-size:.9rem">Cancel</a>
+      </div>
+    </form>
+  </div>
+
+  {{ if .User }}
+  <div class="card stack">
+    <div>
+      <h2>Password</h2>
+      <p class="hint" style="margin-bottom:.6rem">
+        {{ if eq .User.PasswordHash "" }}
+          Not set yet. This account cannot sign in until it has one.
+        {{ else }}
+          Used to pair a device. Each paired client then gets its own token, so
+          changing this does not disconnect existing clients.
+        {{ end }}
+      </p>
+      <form method="post" action="/admin/users/{{ .User.ID }}/password">
+        <input type="hidden" name="csrf" value="{{ .CSRF }}">
+        <input type="password" name="password" placeholder="New password" autocomplete="new-password" required>
+        <button type="submit">Set password</button>
+      </form>
+    </div>
+
+    {{ if not .ReadOnly }}
+    <hr>
+    <div>
+      <h2>Delete this account</h2>
+      <p class="hint" style="margin-bottom:.6rem">
+        Removes the account, its credentials and its index. The files themselves
+        are left untouched on the NAS. Type <code>{{ .User.Username }}</code> to confirm.
+      </p>
+      <form method="post" action="/admin/users/{{ .User.ID }}/delete">
+        <input type="hidden" name="csrf" value="{{ .CSRF }}">
+        <input name="confirm" placeholder="{{ .User.Username }}"
+               autocapitalize="none" autocorrect="off" spellcheck="false" required>
+        <button class="danger" type="submit">Delete account</button>
+      </form>
+    </div>
+    {{ end }}
+  </div>
+  {{ end }}
+</main>

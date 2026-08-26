@@ -29,23 +29,26 @@ storage:
   rescan_interval: 15m
   watcher: true
 
-users:
-  # `home` is the path *inside the container*: /volume1/homes is mounted at
-  # /volumes/homes by the compose file, so /volume1/homes/alice appears here as
-  # /volumes/homes/alice.
-  #
-  # `uid` and `gid` must match the NAS account that owns that directory, or
-  # files Mirage writes will be unreadable over SMB. Find them with `id alice`
-  # over SSH. `mirage doctor` verifies the mapping and warns on a mismatch.
-  - username: alice
-    display_name: Alice
-    home: /volumes/homes/alice
-    uid: 1026
-    gid: 100
-
-  - username: bob
-    display_name: Bob
-    home: /volumes/homes/bob
-    uid: 1027
-    gid: 100
-    quota: 107374182400   # 100 GiB; omit or set 0 for unlimited
+# Accounts are managed from the admin page at /admin, so there is usually no
+# users: section here at all. Sign in with MIRAGE_ADMIN_USERNAME and
+# MIRAGE_ADMIN_PASSWORD from the compose file.
+#
+# Declaring users here instead makes this file authoritative and the admin page
+# read-only. That suits a setup kept under version control, where the config
+# should be the single record of who exists. Pick one; running both is legal but
+# confusing.
+#
+# users:
+#   # `home` is the path *inside the container*: /volume1/homes is mounted at
+#   # /volumes/homes by the compose file, so /volume1/homes/alice appears here
+#   # as /volumes/homes/alice.
+#   #
+#   # `uid` and `gid` must match the NAS account that owns that directory, or
+#   # files Mirage writes will be unreadable over SMB. Find them with `id alice`
+#   # over SSH. `mirage doctor` verifies the mapping and warns on a mismatch.
+#   - username: alice
+#     display_name: Alice
+#     home: /volumes/homes/alice
+#     uid: 1026
+#     gid: 100
+#     quota: 107374182400   # 100 GiB; omit or set 0 for unlimited

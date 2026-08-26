@@ -31,6 +31,10 @@ services:
     environment:
       TZ: Etc/UTC
       MIRAGE_CONFIG: /etc/mirage/mirage.yaml
+      # Accounts are managed from the admin page at /admin. Set a password in a
+      # .env file beside this compose file; without one the page is not served.
+      MIRAGE_ADMIN_USERNAME: ${MIRAGE_ADMIN_USERNAME:-admin}
+      MIRAGE_ADMIN_PASSWORD: ${MIRAGE_ADMIN_PASSWORD:?set MIRAGE_ADMIN_PASSWORD in a .env file beside this compose file}
 
     # Root is required for cross-user chown, but nothing else is. Dropping the
     # rest of the capability set limits what a compromise could reach.

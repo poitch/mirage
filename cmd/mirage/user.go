@@ -6,23 +6,37 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
+	"log/slog"
 	"os"
 	"strings"
 	"text/tabwriter"
 
 	"github.com/poitch/mirage/internal/auth"
+	"github.com/poitch/mirage/internal/fsx"
+	"github.com/poitch/mirage/internal/index"
 	"github.com/poitch/mirage/internal/store"
 	"golang.org/x/term"
 )
 
 const userUsage = `Usage:
   mirage user list                 List accounts and their storage mapping
+  mirage user add <username>       Create an account (see flags below)
   mirage user passwd <username>    Set an account password
   mirage user enable <username>    Re-enable a disabled account
   mirage user disable <username>   Disable an account without deleting it
 
-Accounts themselves are defined in the config file. To add or remove one, edit
-the config and restart; these commands manage credentials and state only.
+Flags for "add":
+  -home   Directory backing the account, as seen inside the container (required)
+  -uid    Owner uid for files Mirage creates (required)
+  -gid    Owner gid for files Mirage creates (required)
+  -name   Display name (defaults to the username)
+  -quota  Storage limit in GB (0 or omitted means unlimited)
+
+Accounts are normally managed from the admin page at /admin. These commands
+exist for scripting, and so that a server with no admin password set is still
+usable. If the config file declares a users: section it is authoritative, and
+changes made here are undone on the next start.
 `
 
 func cmdUser(args []string) error {
@@ -34,6 +48,17 @@ func cmdUser(args []string) error {
 	sub, rest := args[0], args[1:]
 	fs := flag.NewFlagSet("user "+sub, flag.ExitOnError)
 	configPath, verbose := configFlags(fs)
+
+	var addHome, addName string
+	var addUID, addGID int
+	var addQuota float64
+	if sub == "add" {
+		fs.StringVar(&addHome, "home", "", "directory backing the account, inside the container")
+		fs.StringVar(&addName, "name", "", "display name (defaults to the username)")
+		fs.IntVar(&addUID, "uid", -1, "owner uid for files Mirage creates")
+		fs.IntVar(&addGID, "gid", -1, "owner gid for files Mirage creates")
+		fs.Float64Var(&addQuota, "quota", 0, "storage limit in GB (0 for unlimited)")
+	}
 
 	// The username is positional and precedes the flags, so split it out before
 	// parsing.
@@ -50,7 +75,7 @@ func cmdUser(args []string) error {
 	}
 
 	log := newLogger(*verbose)
-	_, db, err := setup(*configPath, log)
+	cfg, db, err := setup(*configPath, log)
 	if err != nil {
 		return err
 	}
@@ -60,6 +85,9 @@ func cmdUser(args []string) error {
 	switch sub {
 	case "list":
 		return userList(ctx, db)
+	case "add":
+		return userAdd(ctx, db, log, cfg.Storage.FileMode.Perm(), cfg.Storage.DirMode.Perm(),
+			username, addHome, addUID, addGID, addName, addQuota)
 	case "passwd":
 		return userPasswd(ctx, db, username)
 	case "enable", "disable":
@@ -76,7 +104,8 @@ func userList(ctx context.Context, db *store.DB) error {
 		return err
 	}
 	if len(users) == 0 {
-		fmt.Println("No users. Define them in the config file.")
+		fmt.Println("No accounts yet. Add one from the admin page at /admin,")
+		fmt.Println("or here with: mirage user add <username> -home ... -uid ... -gid ...")
 		return nil
 	}
 
@@ -101,10 +130,62 @@ func userList(ctx context.Context, db *store.DB) error {
 	return w.Flush()
 }
 
+func userAdd(ctx context.Context, db *store.DB, log *slog.Logger, fileMode, dirMode fs.FileMode,
+	username, home string, uid, gid int, displayName string, quotaGB float64) error {
+	if home == "" {
+		return errors.New("-home is required; give the path as seen inside the container")
+	}
+	if uid < 0 || gid < 0 {
+		return errors.New("-uid and -gid are required; find them with `id <username>` on the NAS")
+	}
+
+	created, err := db.CreateUser(ctx, store.UserMapping{
+		Username:    username,
+		DisplayName: displayName,
+		Home:        home,
+		UID:         uid,
+		GID:         gid,
+		Quota:       int64(quotaGB * 1024 * 1024 * 1024),
+	})
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Created %s -> %s (%d:%d).\n", created.Username, created.Home, created.UID, created.GID)
+
+	p := fsx.ProbeHome(created.Home, created.UID, created.GID)
+	switch {
+	case !p.OK():
+		fmt.Printf("WARN  %s %s\n", p.Path, p.Problem)
+	case p.Warning != "":
+		fmt.Printf("WARN  %s %s\n", p.Path, p.Warning)
+	}
+
+	// Index it now: until an account's root is in the index, every request for
+	// it answers 404, and the account would look broken until the next scan.
+	if p.OK() {
+		storage := fsx.NewManager(fileMode, dirMode)
+		defer storage.Close()
+		stats, err := index.NewScanner(db, storage, log).ScanUser(ctx, created)
+		if err != nil {
+			fmt.Printf("WARN  could not index the account: %v\n", err)
+			fmt.Println("      run `mirage scan` once the directory is reachable")
+		} else {
+			fmt.Printf("Indexed %d files in %d directories (%s).\n",
+				stats.Files, stats.Dirs, formatBytes(stats.Bytes))
+		}
+	}
+
+	// Reported rather than left to be discovered: the account cannot be used
+	// until it has one, and a fresh account looks fine in `user list` otherwise.
+	fmt.Printf("Set a password before connecting a client:  mirage user passwd %s\n", created.Username)
+	return nil
+}
+
 func userPasswd(ctx context.Context, db *store.DB, username string) error {
 	u, err := db.UserByName(ctx, username)
 	if errors.Is(err, store.ErrNotFound) {
-		return fmt.Errorf("no user %q; accounts are defined in the config file", username)
+		return fmt.Errorf("no account %q", username)
 	} else if err != nil {
 		return err
 	}

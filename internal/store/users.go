@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/poitch/mirage/internal/account"
 )
 
 // ErrNotFound is returned when a lookup matches no row.
@@ -234,4 +236,139 @@ func (db *DB) SetDisabled(ctx context.Context, userID int64, disabled bool) erro
 		`UPDATE users SET disabled = ?, disabled_reason = ?, updated_at = ? WHERE id = ?`,
 		disabled, reason, time.Now().Unix(), userID)
 	return err
+}
+
+// otherMappings returns every account's identity and home except one.
+func otherMappings(ctx context.Context, q Querier, excludeID int64) ([]account.Mapping, error) {
+	rows, err := q.QueryContext(ctx,
+		`SELECT username, home FROM users WHERE id <> ?`, excludeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []account.Mapping
+	for rows.Next() {
+		var m account.Mapping
+		if err := rows.Scan(&m.Username, &m.Home); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// validateMapping applies the account rules and returns the cleaned mapping.
+func validateMapping(ctx context.Context, q Querier, m UserMapping, excludeID int64) (UserMapping, error) {
+	if err := account.ValidateUsername(m.Username); err != nil {
+		return m, err
+	}
+	home, err := account.ValidateHome(m.Home)
+	if err != nil {
+		return m, err
+	}
+	m.Home = home
+	if err := account.ValidateOwnership(m.UID, m.GID); err != nil {
+		return m, err
+	}
+	if m.Quota < 0 {
+		return m, errors.New("quota must not be negative (use 0 for unlimited)")
+	}
+	if m.DisplayName == "" {
+		m.DisplayName = m.Username
+	}
+
+	others, err := otherMappings(ctx, q, excludeID)
+	if err != nil {
+		return m, err
+	}
+	if err := account.CheckConflicts(account.Mapping{Username: m.Username, Home: m.Home}, others); err != nil {
+		return m, err
+	}
+	return m, nil
+}
+
+// CreateUser adds an account.
+//
+// Validation runs inside the transaction that inserts the row, so two admins
+// adding overlapping accounts at once cannot both pass the conflict check and
+// leave one account's directory sitting inside another's.
+func (db *DB) CreateUser(ctx context.Context, m UserMapping) (User, error) {
+	var created User
+	err := db.Tx(ctx, func(tx *sql.Tx) error {
+		clean, err := validateMapping(ctx, tx, m, 0)
+		if err != nil {
+			return err
+		}
+		now := time.Now().Unix()
+		res, err := tx.ExecContext(ctx, `
+			INSERT INTO users (username, display_name, home, uid, gid, quota, disabled, disabled_reason, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, 0, '', ?, ?)`,
+			clean.Username, clean.DisplayName, clean.Home, clean.UID, clean.GID, clean.Quota, now, now)
+		if err != nil {
+			return err
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			return err
+		}
+		created, err = scanUser(tx.QueryRowContext(ctx,
+			`SELECT `+userColumns+` FROM users WHERE id = ?`, id))
+		return err
+	})
+	return created, err
+}
+
+// UpdateUser changes an account's identity and storage mapping.
+//
+// Credentials are untouched, as is the disabled state; those are separate
+// actions with their own consequences.
+func (db *DB) UpdateUser(ctx context.Context, id int64, m UserMapping) error {
+	return db.Tx(ctx, func(tx *sql.Tx) error {
+		before, err := scanUser(tx.QueryRowContext(ctx,
+			`SELECT `+userColumns+` FROM users WHERE id = ?`, id))
+		if err != nil {
+			return err
+		}
+		clean, err := validateMapping(ctx, tx, m, id)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE users SET username = ?, display_name = ?, home = ?, uid = ?, gid = ?,
+			                 quota = ?, updated_at = ?
+			WHERE id = ?`,
+			clean.Username, clean.DisplayName, clean.Home, clean.UID, clean.GID,
+			clean.Quota, time.Now().Unix(), id); err != nil {
+			return err
+		}
+		// A moved home invalidates every indexed path for this account: the
+		// stored file IDs and ETags describe a tree Mirage no longer reads.
+		if before.Home != clean.Home {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE user_id = ?`, id); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// DeleteUser removes an account, its credentials and its index.
+//
+// The files themselves are left alone. They are ordinary files on the NAS that
+// exist independently of Mirage, and deleting somebody's documents because an
+// account was removed is not a decision this should make.
+func (db *DB) DeleteUser(ctx context.Context, id int64) error {
+	res, err := db.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }

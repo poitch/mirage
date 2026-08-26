@@ -108,6 +108,13 @@ func setup(configPath string, log *slog.Logger) (*config.Config, *store.DB, erro
 		return nil, nil, err
 	}
 
+	// When the config file declares no accounts, it is not managing them and
+	// the database stands alone. Reconciling against an empty list would
+	// disable every account the admin page created.
+	if !cfg.ManagesUsers() {
+		return cfg, db, nil
+	}
+
 	mappings := make([]store.UserMapping, len(cfg.Users))
 	for i, u := range cfg.Users {
 		mappings[i] = store.UserMapping{

@@ -20,13 +20,11 @@ storage:
   rescan_interval: 30s
   watcher: true
 
-users:
-  # On macOS and Windows, Docker's bind mounts virtualise file ownership: chown
-  # inside the container does not reach the host. So this stack exercises
-  # everything except the UID/GID mapping, which only means anything on a real
-  # Linux filesystem. Test that part on the NAS.
-  - username: alice
-    display_name: Alice
-    home: /homes/alice
-    uid: 1000
-    gid: 1000
+# No users: section, so accounts are managed from the admin page at /admin.
+# Declaring them here instead would make this file authoritative and the page
+# read-only.
+#
+# On macOS and Windows, Docker's bind mounts virtualise file ownership: chown
+# inside the container does not reach the host. So this stack exercises
+# everything except the UID/GID mapping, which only means anything on a real
+# Linux filesystem. Test that part on the NAS.
