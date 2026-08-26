@@ -121,9 +121,15 @@ unreadable over SMB — `mirage doctor` checks for exactly this.
 
 ### 3. Create the directories
 
+Both stacks mount these, and Docker refuses to start over a missing bind mount
+source rather than creating it:
+
 ```
 sudo mkdir -p /volume1/docker/mirage/{config,data}
 ```
+
+`/volume1/homes` is the third mount, created by DSM in step 1. Everything else
+the stacks use is a named volume, which Docker creates by itself.
 
 ### 4. Write the config
 

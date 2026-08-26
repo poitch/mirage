@@ -22,7 +22,12 @@
 #      this node drops off your tailnet when the key expires and sync stops
 #      working months later for no visible reason.
 #
-#   3. Copy three files onto the NAS, into /volume1/docker/mirage:
+#   3. Create the directories the stack mounts, and copy three files into
+#      /volume1/docker/mirage:
+#
+#        sudo mkdir -p /volume1/docker/mirage/{config,data}
+#
+#      Files:
 #        docker-compose.tailscale.yml  (this file)
 #        tailscale-serve.json          (next to it, NOT in config/)
 #        mirage.example.yaml           -> config/mirage.yaml
@@ -86,7 +91,10 @@ services:
       #
       # TS_EXTRA_ARGS: --advertise-tags=tag:family
     volumes:
-      - /volume1/docker/mirage/tailscale:/var/lib/tailscale
+      # A named volume rather than a bind mount: this is opaque node state, so
+      # there is nothing to gain from a known path, and Docker creates a named
+      # volume by itself instead of refusing to start over a missing directory.
+      - mirage-tailscale-state:/var/lib/tailscale
       - ./tailscale-serve.json:/config/serve.json:ro
     healthcheck:
       test: ["CMD", "tailscale", "status"]
@@ -135,3 +143,6 @@ services:
       - FOWNER
     security_opt:
       - no-new-privileges:true
+
+volumes:
+  mirage-tailscale-state:
