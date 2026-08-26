@@ -218,11 +218,11 @@ func (s *Server) rescan(ctx context.Context) {
 		s.log.Error("initial scan failed", "error", err)
 	}
 
-	if s.cfg.Storage.RescanInterval <= 0 {
+	if s.cfg.Storage.RescanInterval.Duration() <= 0 {
 		s.log.Warn("periodic rescan is disabled; changes made outside Mirage will not be seen")
 		return
 	}
-	ticker := time.NewTicker(s.cfg.Storage.RescanInterval)
+	ticker := time.NewTicker(s.cfg.Storage.RescanInterval.Duration())
 	defer ticker.Stop()
 	for {
 		select {

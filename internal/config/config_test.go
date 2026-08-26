@@ -59,7 +59,7 @@ func TestLoadValid(t *testing.T) {
 		t.Errorf("dir_mode = %#o, want 0755", got)
 	}
 	// Unset fields must fall back to defaults rather than zero values.
-	if cfg.Storage.RescanInterval != 15*time.Minute {
+	if cfg.Storage.RescanInterval.Duration() != 15*time.Minute {
 		t.Errorf("rescan_interval = %v, want 15m default", cfg.Storage.RescanInterval)
 	}
 	if !cfg.Storage.Watcher {
@@ -83,6 +83,53 @@ func TestFileModeIsOctal(t *testing.T) {
 	}
 	if got := cfg.Storage.FileMode.Perm(); got != 0o600 {
 		t.Fatalf("file_mode = %#o, want 0600", got)
+	}
+}
+
+// TestRescanIntervalParsing covers the case that motivated a custom type:
+// yaml.v3 decodes a duration string into time.Duration but rejects a bare
+// integer, so "rescan_interval: 0" - the documented way to turn the periodic
+// scan off - would otherwise fail to load.
+func TestRescanIntervalParsing(t *testing.T) {
+	tests := []struct {
+		value string
+		want  time.Duration
+	}{
+		{`"30s"`, 30 * time.Second},
+		{`30s`, 30 * time.Second},
+		{`"2h"`, 2 * time.Hour},
+		{`1h30m`, 90 * time.Minute},
+		{`0`, 0},
+		{`"0s"`, 0},
+	}
+	for _, tc := range tests {
+		body := strings.Replace(validConfig, `  dir_mode: "0755"`,
+			"  dir_mode: \"0755\"\n  rescan_interval: "+tc.value, 1)
+		cfg, err := Load(writeConfig(t, body))
+		if err != nil {
+			t.Errorf("rescan_interval: %s -> %v", tc.value, err)
+			continue
+		}
+		if got := cfg.Storage.RescanInterval.Duration(); got != tc.want {
+			t.Errorf("rescan_interval: %s -> %v, want %v", tc.value, got, tc.want)
+		}
+	}
+}
+
+// TestRescanIntervalRejectsUnitlessNumbers: guessing a unit for a bare number
+// could set an interval orders of magnitude off, so it must be an error.
+func TestRescanIntervalRejectsUnitlessNumbers(t *testing.T) {
+	for _, value := range []string{"30", "900", `"soon"`, `"30 seconds"`} {
+		body := strings.Replace(validConfig, `  dir_mode: "0755"`,
+			"  dir_mode: \"0755\"\n  rescan_interval: "+value, 1)
+		_, err := Load(writeConfig(t, body))
+		if err == nil {
+			t.Errorf("rescan_interval: %s was accepted; it should require a unit", value)
+			continue
+		}
+		if !strings.Contains(err.Error(), "unit") && !strings.Contains(err.Error(), "valid duration") {
+			t.Errorf("rescan_interval: %s -> %v; error should explain the unit requirement", value, err)
+		}
 	}
 }
 

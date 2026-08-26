@@ -1,0 +1,37 @@
+# Local development. Run from the repository root:
+#
+#   docker compose up --build
+#   docker compose exec mirage mirage user passwd alice
+#
+# Then point a Nextcloud client at http://localhost:8080.
+#
+# The Synology deployment is a different file: deploy/docker-compose.yml.
+
+services:
+  mirage:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    image: mirage:dev
+    container_name: mirage-dev
+    restart: unless-stopped
+
+    ports:
+      - "8080:8080"
+
+    volumes:
+      - ./deploy/mirage.local.yaml:/etc/mirage/mirage.yaml:ro
+      # Sample home directories, shared with the non-container workflow so both
+      # see the same files. Created by whichever you run first.
+      - ./.local/homes:/homes
+      # The index lives in a named volume rather than a bind mount: it is a
+      # SQLite database in WAL mode, and macOS bind mounts are a poor host for
+      # that. Losing it costs a rescan, nothing more.
+      - mirage-dev-index:/var/lib/mirage
+
+    environment:
+      TZ: Etc/UTC
+      MIRAGE_CONFIG: /etc/mirage/mirage.yaml
+
+volumes:
+  mirage-dev-index:

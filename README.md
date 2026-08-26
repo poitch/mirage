@@ -61,11 +61,21 @@ front — it advertises read-only permissions and a matching `Allow` header — 
 the client marks the folder read-only rather than failing mid-sync. M3 makes it
 bidirectional.
 
+Either run it directly:
+
 ```
 mirage doctor            # confirm the config and each user's storage mapping
 mirage user passwd alice # set a password for pairing
 mirage scan              # build the index (the server also does this on start)
 mirage serve
+```
+
+or bring up the local Docker stack, which serves sample files from
+`.local/homes/alice` on port 8080:
+
+```
+docker compose up --build -d
+docker compose exec mirage mirage user passwd alice
 ```
 
 Then in the Nextcloud desktop client, use **Log in** and enter your
@@ -84,9 +94,19 @@ run `mirage scan`.
 
 ## Running it
 
-See [`deploy/docker-compose.yml`](deploy/docker-compose.yml) for the Synology
-setup and [`deploy/mirage.example.yaml`](deploy/mirage.example.yaml) for an
-annotated config.
+[`deploy/mirage.example.yaml`](deploy/mirage.example.yaml) is an annotated
+config. For the NAS there are two deployments:
+
+- [`deploy/docker-compose.yml`](deploy/docker-compose.yml) — plain, on a LAN port.
+- [`deploy/docker-compose.tailscale.yml`](deploy/docker-compose.tailscale.yml) —
+  behind a Tailscale sidecar running `tailscale serve`, which gives you
+  `https://mirage.<your-tailnet>.ts.net` with a real certificate and nothing to
+  renew. Reachable only from your tailnet, so nothing is exposed publicly.
+  Sync clients send credentials on every request, so HTTPS is worth having.
+
+Mirage builds no URL from the `Host` header — every absolute URL comes from
+`server.external_url` — so it sits behind a proxy without extra configuration.
+The one requirement is that `external_url` matches the name clients use.
 
 ```
 mirage serve     # run the server

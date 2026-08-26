@@ -1,0 +1,84 @@
+# Mirage on a Synology, reachable over your tailnet at
+# https://mirage.<your-tailnet>.ts.net with a real certificate and no
+# reverse proxy, port forward, or certificate renewal to manage.
+#
+# This is `tailscale serve`, not `funnel`: the server is reachable only by
+# devices on your tailnet, which is what you want for family access.
+#
+# Setup:
+#   1. In the Tailscale admin console, enable MagicDNS and HTTPS certificates.
+#      Serve cannot issue a certificate without both.
+#   2. Generate a reusable auth key and put it in a .env file beside this one:
+#        TS_AUTHKEY=tskey-auth-...
+#   3. Copy mirage.example.yaml to the config directory and edit it. The one
+#      setting that must match this file is:
+#        server:
+#          listen: "127.0.0.1:8080"
+#          external_url: "https://mirage.<your-tailnet>.ts.net"
+#      external_url is baked into the pairing URLs handed to clients, so it has
+#      to be the name they actually resolve. Getting it wrong pairs and hangs.
+#   4. docker compose -f docker-compose.tailscale.yml up -d
+#   5. docker compose -f docker-compose.tailscale.yml exec mirage mirage doctor
+#
+# Family members install the Nextcloud client and enter the ts.net URL. They
+# need to be on the tailnet; nothing is exposed to the public internet.
+
+services:
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: mirage-tailscale
+    hostname: mirage # becomes mirage.<your-tailnet>.ts.net
+    restart: unless-stopped
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:?set TS_AUTHKEY in a .env file beside this compose file}
+      TS_STATE_DIR: /var/lib/tailscale
+      # Userspace networking avoids needing /dev/net/tun and NET_ADMIN, which
+      # Synology's Container Manager does not always grant.
+      TS_USERSPACE: "true"
+      TS_SERVE_CONFIG: /config/serve.json
+      TS_EXTRA_ARGS: --advertise-tags=tag:mirage
+    volumes:
+      - /volume1/docker/mirage/tailscale:/var/lib/tailscale
+      - ./tailscale-serve.json:/config/serve.json:ro
+    healthcheck:
+      test: ["CMD", "tailscale", "status"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  mirage:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: ghcr.io/poitch/mirage:latest
+    container_name: mirage
+    restart: unless-stopped
+
+    # Share the sidecar's network namespace so `tailscale serve` can reach
+    # Mirage on 127.0.0.1. There is deliberately no `ports:` block: Mirage
+    # should bind to 127.0.0.1 and be reachable only through the tailnet.
+    network_mode: service:tailscale
+    depends_on:
+      tailscale:
+        condition: service_healthy
+
+    volumes:
+      - /volume1/docker/mirage/config:/etc/mirage:ro
+      - /volume1/docker/mirage/data:/var/lib/mirage
+      - /volume1/homes:/volumes/homes
+
+    environment:
+      TZ: Etc/UTC
+      MIRAGE_CONFIG: /etc/mirage/mirage.yaml
+
+    # Root is required for cross-user chown, but nothing else is.
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - DAC_READ_SEARCH
+      - FOWNER
+    security_opt:
+      - no-new-privileges:true

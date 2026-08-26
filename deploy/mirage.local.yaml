@@ -1,0 +1,32 @@
+# Config for the local Docker Compose stack at ../compose.yaml.
+#
+# Paths here are container paths. The compose file mounts ./.local/homes from
+# the repository at /homes, so /homes/alice is ./.local/homes/alice on the host.
+
+server:
+  listen: ":8080"
+  # The client runs on the host and reaches the container through the published
+  # port, so localhost is correct here.
+  external_url: "http://localhost:8080"
+
+database:
+  path: /var/lib/mirage/mirage.db
+
+storage:
+  file_mode: "0644"
+  dir_mode: "0755"
+  # Short for testing. Until the watcher lands this is how long a file added
+  # outside Mirage takes to reach clients.
+  rescan_interval: 30s
+  watcher: true
+
+users:
+  # On macOS and Windows, Docker's bind mounts virtualise file ownership: chown
+  # inside the container does not reach the host. So this stack exercises
+  # everything except the UID/GID mapping, which only means anything on a real
+  # Linux filesystem. Test that part on the NAS.
+  - username: alice
+    display_name: Alice
+    home: /homes/alice
+    uid: 1000
+    gid: 1000

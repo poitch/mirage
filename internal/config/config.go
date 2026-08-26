@@ -58,8 +58,8 @@ type Storage struct {
 	DirMode  FileMode `yaml:"dir_mode"`
 	// RescanInterval is how often the full reconciliation walk runs. This is
 	// the backstop that catches out-of-band changes the watcher missed, so it
-	// should stay enabled even when the watcher is healthy.
-	RescanInterval time.Duration `yaml:"rescan_interval"`
+	// should stay enabled even when the watcher is healthy. Zero disables it.
+	RescanInterval Duration `yaml:"rescan_interval"`
 	// Watcher enables the fsnotify watcher. Disabling it leaves reconciliation
 	// entirely to RescanInterval, which is slower but still correct.
 	Watcher bool `yaml:"watcher"`
@@ -93,7 +93,7 @@ func Default() Config {
 		Storage: Storage{
 			FileMode:       0o640,
 			DirMode:        0o750,
-			RescanInterval: 15 * time.Minute,
+			RescanInterval: Duration(15 * time.Minute),
 			Watcher:        true,
 		},
 	}
@@ -198,6 +198,48 @@ func (c *Config) Validate() error {
 	}
 	return nil
 }
+
+// Duration is a time span parsed from a string such as "15m".
+//
+// It exists because yaml.v3 will decode a duration string into time.Duration
+// but rejects a bare integer, including 0 - and 0 is exactly what someone
+// writes to turn a periodic task off. Accepting it avoids a config that fails
+// to load for following its own documentation.
+type Duration time.Duration
+
+// UnmarshalYAML parses a duration string, or a literal 0.
+func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
+	var s string
+	if err := value.Decode(&s); err == nil {
+		parsed, err := time.ParseDuration(s)
+		if err != nil {
+			return fmt.Errorf("%q is not a valid duration: use a unit, such as \"30s\", \"15m\" or \"2h\"", s)
+		}
+		*d = Duration(parsed)
+		return nil
+	}
+
+	var n int64
+	if err := value.Decode(&n); err != nil {
+		return fmt.Errorf("expected a duration such as \"15m\", got %q", value.Value)
+	}
+	if n != 0 {
+		// A bare number has no obvious unit, and guessing one would silently
+		// produce an interval orders of magnitude off.
+		return fmt.Errorf("duration %d needs a unit: write %ds, %dm or %dh", n, n, n, n)
+	}
+	*d = 0
+	return nil
+}
+
+// MarshalYAML renders the duration back out as a string.
+func (d Duration) MarshalYAML() (any, error) { return time.Duration(d).String(), nil }
+
+// Duration returns the value as a time.Duration.
+func (d Duration) Duration() time.Duration { return time.Duration(d) }
+
+// String renders the duration.
+func (d Duration) String() string { return time.Duration(d).String() }
 
 // FileMode is a Unix permission bitmask parsed from an octal string such as
 // "0640". It is a distinct type because YAML's own integer parsing would read
