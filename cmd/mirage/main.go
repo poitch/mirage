@@ -156,5 +156,9 @@ func cmdServe(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	return server.New(cfg, db, log).Run(ctx)
+	srv, err := server.New(cfg, db, log)
+	if err != nil {
+		return err
+	}
+	return srv.Run(ctx)
 }

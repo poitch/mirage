@@ -123,6 +123,11 @@ CREATE TABLE sync_log (
 );
 CREATE INDEX idx_sync_log_user_at ON sync_log(user_id, at);
 `,
+	// 2: remember which client started a pairing flow, so the app password it
+	// receives can be named after the device rather than left anonymous.
+	`
+ALTER TABLE login_flows ADD COLUMN user_agent TEXT NOT NULL DEFAULT '';
+`,
 }
 
 // migrate applies any migrations the database has not yet seen.

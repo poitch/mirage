@@ -9,21 +9,48 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/poitch/mirage/internal/auth"
 	"github.com/poitch/mirage/internal/config"
+	"github.com/poitch/mirage/internal/ocs"
 	"github.com/poitch/mirage/internal/store"
 )
 
+// pairingPruneInterval is how often expired pairing sessions are swept.
+const pairingPruneInterval = 5 * time.Minute
+
 // Server is the Mirage HTTP server.
 type Server struct {
-	cfg  *config.Config
-	db   *store.DB
-	log  *slog.Logger
-	http *http.Server
+	cfg       *config.Config
+	db        *store.DB
+	log       *slog.Logger
+	auth      *auth.Authenticator
+	loginFlow *auth.LoginFlow
+	ocs       *ocs.Service
+	http      *http.Server
 }
 
 // New builds a Server. It does not begin listening; call Run for that.
-func New(cfg *config.Config, db *store.DB, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, db: db, log: log}
+func New(cfg *config.Config, db *store.DB, log *slog.Logger) (*Server, error) {
+	authenticator := auth.NewAuthenticator(db, log)
+
+	loginFlow, err := auth.NewLoginFlow(db, authenticator, cfg.Server.ExternalURL, log)
+	if err != nil {
+		return nil, fmt.Errorf("build login flow: %w", err)
+	}
+
+	// Trashbin and versioning stay unadvertised until they are implemented:
+	// announcing them would put controls in the client that then fail.
+	features := ocs.Features{Trashbin: false, Versioning: false}
+
+	ocsService, err := ocs.NewService(cfg.Server.AdvertisedVersion, features, authenticator, db, log, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build OCS service: %w", err)
+	}
+
+	s := &Server{
+		cfg: cfg, db: db, log: log,
+		auth: authenticator, loginFlow: loginFlow, ocs: ocsService,
+	}
 	s.http = &http.Server{
 		Addr:    cfg.Server.Listen,
 		Handler: s.routes(),
@@ -34,20 +61,38 @@ func New(cfg *config.Config, db *store.DB, log *slog.Logger) *Server {
 		IdleTimeout:       120 * time.Second,
 		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 	}
-	return s
+	return s, nil
 }
 
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
+	protected := s.auth.Require
 
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		if err := s.db.PingContext(r.Context()); err != nil {
-			http.Error(w, "database unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		fmt.Fprintln(w, "ok")
-	})
+	mux.HandleFunc("GET /healthz", s.health)
+
+	// Server identification. A client that cannot read status.php never gets
+	// as far as offering to log in.
+	mux.HandleFunc("GET /status.php", s.ocs.Status)
+	mux.HandleFunc("GET /index.php/204", s.ocs.NoContent)
+
+	// Capabilities are static and reveal nothing about any account, so they are
+	// served unauthenticated. Clients ask both before and after pairing.
+	mux.HandleFunc("GET /ocs/v1.php/cloud/capabilities", s.ocs.Capabilities(ocs.V1))
+	mux.HandleFunc("GET /ocs/v2.php/cloud/capabilities", s.ocs.Capabilities(ocs.V2))
+
+	mux.Handle("GET /ocs/v1.php/cloud/user", protected(s.ocs.User(ocs.V1)))
+	mux.Handle("GET /ocs/v2.php/cloud/user", protected(s.ocs.User(ocs.V2)))
+
+	// Clients call this when an account is removed, to revoke their own token.
+	mux.Handle("DELETE /ocs/v2.php/core/apppassword", protected(s.ocs.DeleteAppPassword(ocs.V2)))
+
+	// Login Flow v2. The poll endpoint is advertised without the index.php
+	// prefix but clients have historically used both, so both are routed.
+	mux.HandleFunc("POST /index.php/login/v2", s.loginFlow.Start)
+	mux.HandleFunc("POST /login/v2/poll", s.loginFlow.Poll)
+	mux.HandleFunc("POST /index.php/login/v2/poll", s.loginFlow.Poll)
+	mux.HandleFunc("GET /index.php/login/v2/flow/{token}", s.loginFlow.Page)
+	mux.HandleFunc("POST /index.php/login/v2/flow/{token}", s.loginFlow.Page)
 
 	// Nextcloud clients probe undocumented paths and shift between releases.
 	// Logging every unrouted request turns "the client mysteriously fails to
@@ -58,11 +103,48 @@ func (s *Server) routes() http.Handler {
 		http.NotFound(w, r)
 	})
 
-	return mux
+	return s.withRequestLogging(mux)
+}
+
+func (s *Server) health(w http.ResponseWriter, r *http.Request) {
+	if err := s.db.PingContext(r.Context()); err != nil {
+		http.Error(w, "database unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	fmt.Fprintln(w, "ok")
+}
+
+// statusRecorder captures the response status for logging.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (rec *statusRecorder) WriteHeader(code int) {
+	rec.status = code
+	rec.ResponseWriter.WriteHeader(code)
+}
+
+func (s *Server) withRequestLogging(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.log.Enabled(r.Context(), slog.LevelDebug) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		s.log.Debug("request",
+			"method", r.Method, "path", r.URL.Path,
+			"status", rec.status, "duration", time.Since(start))
+	})
 }
 
 // Run serves until ctx is cancelled, then shuts down gracefully.
 func (s *Server) Run(ctx context.Context) error {
+	go s.prunePairingSessions(ctx)
+
 	errCh := make(chan error, 1)
 	go func() {
 		s.log.Info("listening", "addr", s.cfg.Server.Listen, "external_url", s.cfg.Server.ExternalURL)
@@ -84,5 +166,20 @@ func (s *Server) Run(ctx context.Context) error {
 			return fmt.Errorf("shutdown: %w", err)
 		}
 		return nil
+	}
+}
+
+// prunePairingSessions sweeps abandoned pairing sessions until ctx is done.
+func (s *Server) prunePairingSessions(ctx context.Context) {
+	ticker := time.NewTicker(pairingPruneInterval)
+	defer ticker.Stop()
+	s.loginFlow.PrunePairingSessions(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.loginFlow.PrunePairingSessions(ctx)
+		}
 	}
 }

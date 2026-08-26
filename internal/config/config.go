@@ -35,6 +35,12 @@ type Server struct {
 	// the Login Flow v2 and notify_push URLs handed to clients, so it must be
 	// the address they can actually reach, not the container-internal one.
 	ExternalURL string `yaml:"external_url"`
+	// AdvertisedVersion is the Nextcloud server version Mirage claims to be.
+	//
+	// Clients gate features on it and may warn about a server they consider
+	// end-of-life, so it is configurable: a client release can change its mind
+	// about what it accepts, and that should be fixable without a rebuild.
+	AdvertisedVersion string `yaml:"advertised_version"`
 }
 
 // Database holds index database settings.
@@ -79,7 +85,10 @@ type User struct {
 // is unmarshalled over it.
 func Default() Config {
 	return Config{
-		Server:   Server{Listen: ":8080"},
+		Server: Server{
+			Listen:            ":8080",
+			AdvertisedVersion: "31.0.0",
+		},
 		Database: Database{Path: "/var/lib/mirage/mirage.db"},
 		Storage: Storage{
 			FileMode:       0o640,
@@ -111,6 +120,9 @@ func Load(path string) (*Config, error) {
 // usernameRe matches usernames safe to embed in a WebDAV URL path segment.
 var usernameRe = regexp.MustCompile(`^[A-Za-z0-9._@-]{1,64}$`)
 
+// advertisedVersionRe matches a three-part version such as "31.0.0".
+var advertisedVersionRe = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
+
 // Validate checks the configuration for errors that would otherwise surface as
 // confusing runtime failures.
 func (c *Config) Validate() error {
@@ -131,6 +143,11 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("server.external_url must include a host")
 	}
 	c.Server.ExternalURL = strings.TrimRight(c.Server.ExternalURL, "/")
+
+	if !advertisedVersionRe.MatchString(c.Server.AdvertisedVersion) {
+		return fmt.Errorf("server.advertised_version %q must look like MAJOR.MINOR.MICRO",
+			c.Server.AdvertisedVersion)
+	}
 
 	if c.Database.Path == "" {
 		return fmt.Errorf("database.path must not be empty")

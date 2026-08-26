@@ -160,6 +160,10 @@ func (db *DB) ReconcileUsers(ctx context.Context, want []UserMapping) (Reconcile
 
 const userColumns = `id, username, display_name, password_hash, home, uid, gid, quota, disabled, disabled_reason`
 
+// userColumnsPrefixed is userColumns qualified for use in a join, where a bare
+// column list would be ambiguous.
+const userColumnsPrefixed = `id, u.username, u.display_name, u.password_hash, u.home, u.uid, u.gid, u.quota, u.disabled, u.disabled_reason`
+
 func scanUser(row interface{ Scan(...any) error }) (User, error) {
 	var u User
 	err := row.Scan(&u.ID, &u.Username, &u.DisplayName, &u.PasswordHash,
