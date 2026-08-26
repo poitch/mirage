@@ -261,3 +261,123 @@ func TestUserUsageTracksScan(t *testing.T) {
 		t.Errorf("usage = %d, want %d", used, want)
 	}
 }
+
+// TestScanDetectsRename is what stops a folder rename over SMB from looking
+// like a mass delete. Clients tell a rename from a delete-plus-create by the
+// file ID, so it has to survive the move.
+func TestScanDetectsRename(t *testing.T) {
+	f := newFixture(t)
+	f.scan(t)
+	before := f.node(t, "docs/report.txt")
+
+	if err := os.Rename(
+		filepath.Join(f.home, "docs", "report.txt"),
+		filepath.Join(f.home, "docs", "renamed.txt")); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	stats := f.scan(t)
+
+	if stats.Moved != 1 {
+		t.Errorf("Moved = %d, want 1", stats.Moved)
+	}
+	after := f.node(t, "docs/renamed.txt")
+	if after.ID != before.ID {
+		t.Errorf("file ID changed across an out-of-band rename: %d then %d", before.ID, after.ID)
+	}
+	if _, err := store.NodeByPath(context.Background(), f.db, f.user.ID, "docs/report.txt"); err == nil {
+		t.Error("the old path is still indexed")
+	}
+}
+
+// TestScanDetectsRenameAcrossDirectories covers the ordering trap. Pruning per
+// directory would make detection depend on whether the source or destination
+// happened to be walked first; sweeping once at the end removes that.
+func TestScanDetectsRenameAcrossDirectories(t *testing.T) {
+	// Both directions: destination sorts before the source, and after it.
+	tests := []struct{ name, from, to string }{
+		{"into a later directory", "top.txt", "docs/moved.txt"},
+		{"into an earlier directory", "docs/nested/deep.txt", "aaa-moved.txt"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			f.scan(t)
+			before := f.node(t, tc.from)
+
+			if err := os.Rename(filepath.Join(f.home, tc.from), filepath.Join(f.home, tc.to)); err != nil {
+				t.Fatalf("rename: %v", err)
+			}
+			f.scan(t)
+
+			after := f.node(t, tc.to)
+			if after.ID != before.ID {
+				t.Errorf("file ID changed moving %s -> %s: %d then %d",
+					tc.from, tc.to, before.ID, after.ID)
+			}
+		})
+	}
+}
+
+// TestScanDoesNotMistakeHardLinkForRename: a hard link puts one inode at two
+// live paths. Taking the file ID from the original would corrupt the entry that
+// legitimately holds it.
+func TestScanDoesNotMistakeHardLinkForRename(t *testing.T) {
+	f := newFixture(t)
+	f.scan(t)
+	original := f.node(t, "top.txt")
+
+	if err := os.Link(filepath.Join(f.home, "top.txt"), filepath.Join(f.home, "linked.txt")); err != nil {
+		t.Skipf("hard links unavailable here: %v", err)
+	}
+	stats := f.scan(t)
+
+	if stats.Moved != 0 {
+		t.Errorf("Moved = %d, want 0: a hard link is not a rename", stats.Moved)
+	}
+	if f.node(t, "top.txt").ID != original.ID {
+		t.Error("the original file lost its ID to its hard link")
+	}
+	if f.node(t, "linked.txt").ID == original.ID {
+		t.Error("a hard link was given the same file ID as the original")
+	}
+}
+
+// TestUnreadableDirectorySurvivesTheSweep re-checks the M2 safety property
+// against the end-of-scan sweep, which is a second way the same disaster could
+// happen: a subtree that could not be read must not be judged missing.
+func TestUnreadableDirectorySurvivesTheSweep(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root: permission bits do not restrict access")
+	}
+	f := newFixture(t)
+	f.scan(t)
+
+	docs := filepath.Join(f.home, "docs")
+	if err := os.Chmod(docs, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(docs, 0o755) })
+
+	stats := f.scan(t)
+	if stats.Removed != 0 {
+		t.Errorf("Removed = %d; an unreadable directory must not cause deletions", stats.Removed)
+	}
+	for _, p := range []string{"docs", "docs/report.txt", "docs/nested", "docs/nested/deep.txt"} {
+		if _, err := store.NodeByPath(context.Background(), f.db, f.user.ID, p); err != nil {
+			t.Errorf("%q was swept because its parent could not be read: %v", p, err)
+		}
+	}
+}
+
+func TestScanReportsRemovals(t *testing.T) {
+	f := newFixture(t)
+	f.scan(t)
+
+	if err := os.Remove(filepath.Join(f.home, "top.txt")); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	stats := f.scan(t)
+	if stats.Removed != 1 {
+		t.Errorf("Removed = %d, want 1", stats.Removed)
+	}
+}

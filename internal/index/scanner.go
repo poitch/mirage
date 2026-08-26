@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"mime"
 	"path"
@@ -36,6 +37,8 @@ type Stats struct {
 	Files    int64
 	Dirs     int64
 	Bytes    int64
+	Moved    int64 // entries recognised as renamed rather than new
+	Removed  int64 // index entries dropped because they are gone from disk
 	Skipped  int64 // directories that could not be read and were left untouched
 	Duration time.Duration
 }
@@ -50,21 +53,34 @@ func (s *Scanner) ScanUser(ctx context.Context, user store.User) (Stats, error) 
 		return stats, fmt.Errorf("open storage for %s: %w", user.Username, err)
 	}
 
-	if _, _, err := s.scanDir(ctx, st, user, fsx.RootPath, 0, &stats); err != nil {
+	// Everything this scan touches is stamped with one marker, and whatever
+	// still carries an older one at the end is gone from disk. Sweeping at the
+	// end rather than per directory is what lets a moved file keep its ID: the
+	// entry at its old path is still there when the new one is reached.
+	stamp := store.Stamp()
+
+	if _, _, err := s.scanDir(ctx, st, user, fsx.RootPath, 0, stamp, &stats); err != nil {
 		return stats, err
 	}
+
+	removed, err := store.SweepUnscanned(ctx, s.db, user.ID, stamp)
+	if err != nil {
+		return stats, fmt.Errorf("prune index for %s: %w", user.Username, err)
+	}
+	stats.Removed = removed
 
 	stats.Duration = time.Since(start)
 	s.log.Info("scan complete",
 		"user", user.Username, "files", stats.Files, "dirs", stats.Dirs,
-		"bytes", stats.Bytes, "skipped", stats.Skipped, "duration", stats.Duration)
+		"bytes", stats.Bytes, "moved", stats.Moved, "removed", stats.Removed,
+		"skipped", stats.Skipped, "duration", stats.Duration)
 	return stats, nil
 }
 
 // scanDir indexes one directory and everything beneath it, returning the
 // directory's derived ETag and its recursive size.
 func (s *Scanner) scanDir(ctx context.Context, st *fsx.Storage, user store.User,
-	dirPath string, parentID int64, stats *Stats) (etag string, size int64, err error) {
+	dirPath string, parentID int64, stamp int64, stats *Stats) (etag string, size int64, err error) {
 
 	if err := ctx.Err(); err != nil {
 		return "", 0, err
@@ -80,7 +96,7 @@ func (s *Scanner) scanDir(ctx context.Context, st *fsx.Storage, user store.User,
 		name = ""
 	}
 
-	dirID, err := store.EnsureDirNode(ctx, s.db, user.ID, parentID, dirPath, name)
+	dirID, err := store.EnsureDirNode(ctx, s.db, user.ID, parentID, dirPath, name, stamp)
 	if err != nil {
 		return "", 0, fmt.Errorf("index directory %s: %w", dirPath, err)
 	}
@@ -96,6 +112,13 @@ func (s *Scanner) scanDir(ctx context.Context, st *fsx.Storage, user store.User,
 		s.log.Warn("skipping unreadable directory; its indexed contents are left untouched",
 			"user", user.Username, "path", dirPath, "error", err)
 		stats.Skipped++
+		// The subtree must be stamped as seen, or the end-of-scan sweep would
+		// delete every entry under it - and clients would then delete the real
+		// files. The scan does not know what is in here; that is precisely why
+		// it must not claim the contents are gone.
+		if err := store.MarkSubtreeScanned(ctx, s.db, user.ID, dirPath, stamp); err != nil {
+			return "", 0, fmt.Errorf("preserve unreadable subtree %s: %w", dirPath, err)
+		}
 		existing, lookupErr := store.NodeByPath(ctx, s.db, user.ID, dirPath)
 		if lookupErr != nil {
 			return "", 0, nil
@@ -106,16 +129,14 @@ func (s *Scanner) scanDir(ctx context.Context, st *fsx.Storage, user store.User,
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 
 	digests := make([]ChildDigest, 0, len(entries))
-	keep := make([]string, 0, len(entries))
 	var total int64
 
 	for _, entry := range entries {
 		childName := entry.Name()
 		childPath := fsx.Join(dirPath, childName)
-		keep = append(keep, childName)
 
 		if entry.IsDir() {
-			childETag, childSize, err := s.scanDir(ctx, st, user, childPath, dirID, stats)
+			childETag, childSize, err := s.scanDir(ctx, st, user, childPath, dirID, stamp, stats)
 			if err != nil {
 				return "", 0, err
 			}
@@ -130,8 +151,13 @@ func (s *Scanner) scanDir(ctx context.Context, st *fsx.Storage, user store.User,
 			// The file vanished between listing and stat. Drop it from this
 			// pass rather than indexing something we could not measure.
 			s.log.Debug("entry disappeared during scan", "path", childPath, "error", err)
-			keep = keep[:len(keep)-1]
 			continue
+		}
+
+		if moved, err := s.detectRename(ctx, st, user, childPath, childInfo); err != nil {
+			return "", 0, err
+		} else if moved {
+			stats.Moved++
 		}
 
 		childETag := FileETag(childInfo.Size(), childInfo.ModTime())
@@ -147,7 +173,7 @@ func (s *Scanner) scanDir(ctx context.Context, st *fsx.Storage, user store.User,
 			ContentType: contentType(childName),
 			Dev:         devOf(childInfo),
 			Inode:       inodeOf(childInfo),
-		}); err != nil {
+		}, stamp); err != nil {
 			return "", 0, fmt.Errorf("index file %s: %w", childPath, err)
 		}
 
@@ -162,12 +188,8 @@ func (s *Scanner) scanDir(ctx context.Context, st *fsx.Storage, user store.User,
 	unlock := indexLocks.lock(user.ID)
 	defer unlock()
 
-	if err := store.DeleteMissingChildren(ctx, s.db, dirID, keep); err != nil {
-		return "", 0, fmt.Errorf("prune %s: %w", dirPath, err)
-	}
-
 	etag = DirETag(digests)
-	if err := store.FinalizeDirNode(ctx, s.db, dirID, etag, total, info.ModTime()); err != nil {
+	if err := store.FinalizeDirNode(ctx, s.db, dirID, etag, total, info.ModTime(), stamp); err != nil {
 		return "", 0, fmt.Errorf("finalize %s: %w", dirPath, err)
 	}
 	return etag, total, nil
@@ -198,9 +220,15 @@ func (s *Scanner) ScanPath(ctx context.Context, user store.User, target string) 
 		parentID = parent.ID
 	}
 
+	stamp := store.Stamp()
 	var stats Stats
 	if info.IsDir() {
-		if _, _, err := s.scanDir(ctx, st, user, target, parentID, &stats); err != nil {
+		if _, _, err := s.scanDir(ctx, st, user, target, parentID, stamp, &stats); err != nil {
+			return err
+		}
+		// Scoped sweep: only entries under this subtree, since the rest of the
+		// tree was never visited and must not be judged missing.
+		if err := s.sweepSubtree(ctx, user, target, stamp); err != nil {
 			return err
 		}
 	} else {
@@ -218,7 +246,7 @@ func (s *Scanner) ScanPath(ctx context.Context, user store.User, target string) 
 			ContentType: contentType(name),
 			Dev:         devOf(info),
 			Inode:       inodeOf(info),
-		})
+		}, stamp)
 		unlock()
 		if err != nil {
 			return fmt.Errorf("index %s: %w", target, err)
@@ -228,6 +256,74 @@ func (s *Scanner) ScanPath(ctx context.Context, user store.User, target string) 
 	unlock := indexLocks.lock(user.ID)
 	defer unlock()
 	return propagate(ctx, s.db, user.ID, parentPath)
+}
+
+// sweepSubtree drops index entries under target that this pass did not touch.
+func (s *Scanner) sweepSubtree(ctx context.Context, user store.User, target string, stamp int64) error {
+	unlock := indexLocks.lock(user.ID)
+	defer unlock()
+	_, err := s.db.ExecContext(ctx, `
+		DELETE FROM nodes
+		WHERE user_id = ? AND scanned_at < ? AND path LIKE ? ESCAPE '\'`,
+		user.ID, stamp, escapeLikePrefix(target)+"/%")
+	return err
+}
+
+// detectRename checks whether a file that is new at this path is really one
+// that moved, and if so carries its index entry - and its file ID - across.
+//
+// Clients use the file ID to tell a rename from a delete plus a create. Without
+// this, renaming a large folder over SMB would make every client delete and
+// re-download all of it.
+func (s *Scanner) detectRename(ctx context.Context, st *fsx.Storage, user store.User,
+	newPath string, info fs.FileInfo) (bool, error) {
+
+	if _, err := store.NodeByPath(ctx, s.db, user.ID, newPath); err == nil {
+		return false, nil // already indexed here; nothing moved
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return false, err
+	}
+
+	dev, inode, ok := fsx.Identity(info)
+	if !ok || inode == 0 {
+		return false, nil
+	}
+	previous, err := store.NodeByInode(ctx, s.db, user.ID, dev, inode)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if previous.Path == newPath {
+		return false, nil
+	}
+
+	// A hard link puts one inode at two live paths. If the old path is still
+	// there, this is a second name for the same data, not a move, and taking
+	// the ID would corrupt the entry that legitimately holds it.
+	if _, err := st.Stat(previous.Path); err == nil {
+		return false, nil
+	}
+
+	unlock := indexLocks.lock(user.ID)
+	defer unlock()
+	parent, err := store.NodeByPath(ctx, s.db, user.ID, parentDir(newPath))
+	if err != nil {
+		return false, nil // parent not indexed yet; treat as a new file
+	}
+	if err := store.MoveNode(ctx, s.db, user.ID, previous.Path, newPath, parent.ID, path.Base(newPath)); err != nil {
+		return false, fmt.Errorf("carry file id across rename: %w", err)
+	}
+	s.log.Debug("recognised a rename",
+		"user", user.Username, "from", previous.Path, "to", newPath, "fileid", previous.ID)
+	return true, nil
+}
+
+// escapeLikePrefix escapes LIKE wildcards in a path prefix.
+func escapeLikePrefix(p string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(p)
 }
 
 // ScanAll scans every enabled user in turn.

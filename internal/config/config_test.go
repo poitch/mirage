@@ -157,6 +157,19 @@ func TestValidationErrors(t *testing.T) {
 			wantHint: "already used by",
 		},
 		{
+			// So is nesting: the outer user would see the inner user's files,
+			// and no amount of path confinement would prevent it, because
+			// nothing is escaping any directory.
+			name:     "home nested inside another",
+			body:     strings.Replace(validConfig, "/volumes/homes/nas_bob", "/volumes/homes/nas_alice/shared", 1),
+			wantHint: "would be able to see their files",
+		},
+		{
+			name:     "home containing another",
+			body:     strings.Replace(validConfig, "home: /volumes/homes/nas_bob", "home: /volumes/homes", 1),
+			wantHint: "would be able to see their files",
+		},
+		{
 			name:     "relative home",
 			body:     strings.Replace(validConfig, "/volumes/homes/nas_alice", "homes/nas_alice", 1),
 			wantHint: "absolute path",

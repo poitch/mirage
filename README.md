@@ -30,7 +30,7 @@ Early development. Milestone progress:
 - [x] **M2** — read-only sync: PROPFIND/GET, file index, ETag propagation
 - [x] **M3** — bidirectional sync: PUT/MKCOL/DELETE/MOVE/COPY, UID/GID stamping
 - [x] **M4** — chunked upload for large files
-- [ ] **M5** — out-of-band changes: watcher, rescan, rename detection
+- [x] **M5** — out-of-band changes: watcher, rescan, rename detection
 - [ ] **M6** — instant sync via notify_push
 - [ ] **M7** — trashbin, versions, previews
 - [ ] **M8** — quotas, rate limiting, hardening
@@ -89,9 +89,10 @@ Three things to know while testing:
 baked into the pairing and poll URLs handed to the client. A container-internal
 address will pair and then hang.
 
-Until the filesystem watcher lands in M5, `storage.rescan_interval` is how long
-it takes for a file added over SMB to reach clients. Lower it for testing, or
-run `mirage scan`.
+A file added over SMB or in File Station reaches clients within about a second,
+via the filesystem watcher. `storage.rescan_interval` is the backstop for
+anything the watcher misses — watch limits, dropped events, or changes made
+while Mirage was down.
 
 Mirage must run as **root** to chown files to each user's uid/gid. It will
 otherwise still work, but files land owned by the server process and are

@@ -31,6 +31,7 @@ type Server struct {
 	ocs       *ocs.Service
 	storage   *fsx.Manager
 	scanner   *index.Scanner
+	watcher   *index.Watcher
 	dav       *dav.Handler
 	uploads   *dav.UploadHandler
 	http      *http.Server
@@ -48,6 +49,7 @@ func New(ctx context.Context, cfg *config.Config, db *store.DB, log *slog.Logger
 	storage := fsx.NewManager(cfg.Storage.FileMode.Perm(), cfg.Storage.DirMode.Perm())
 	scanner := index.NewScanner(db, storage, log)
 	updater := index.NewUpdater(db)
+	watcher := index.NewWatcher(db, storage, scanner, updater, log)
 
 	const readOnly = false
 	davHandler := dav.NewHandler(db, storage, updater, scanner, log, instanceID, readOnly)
@@ -73,7 +75,8 @@ func New(ctx context.Context, cfg *config.Config, db *store.DB, log *slog.Logger
 	s := &Server{
 		cfg: cfg, db: db, log: log,
 		auth: authenticator, loginFlow: loginFlow, ocs: ocsService,
-		storage: storage, scanner: scanner, dav: davHandler, uploads: uploadHandler,
+		storage: storage, scanner: scanner, watcher: watcher,
+		dav: davHandler, uploads: uploadHandler,
 	}
 	s.http = &http.Server{
 		Addr:    cfg.Server.Listen,
@@ -183,6 +186,7 @@ func (s *Server) Run(ctx context.Context) error {
 	go s.prunePairingSessions(ctx)
 	go s.pruneUploads(ctx)
 	go s.rescan(ctx)
+	go s.watch(ctx)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -237,6 +241,25 @@ func (s *Server) rescan(ctx context.Context) {
 				s.log.Error("rescan failed", "error", err)
 			}
 		}
+	}
+}
+
+// watch keeps the index in step with the filesystem as changes happen.
+//
+// The watcher is started after the initial scan is under way rather than
+// instead of it: it reports changes from now on, and says nothing about what
+// happened while the server was down.
+func (s *Server) watch(ctx context.Context) {
+	if !s.cfg.Storage.Watcher {
+		s.log.Info("filesystem watcher disabled; changes made outside Mirage will be " +
+			"picked up by the periodic rescan only")
+		return
+	}
+	if err := s.watcher.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		// Losing the watcher costs latency, not correctness: the rescan still
+		// reconciles everything. So it is a warning, not a reason to stop.
+		s.log.Warn("filesystem watcher stopped; falling back to the periodic rescan",
+			"error", err, "rescan_interval", s.cfg.Storage.RescanInterval)
 	}
 }
 

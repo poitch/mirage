@@ -160,6 +160,7 @@ func (c *Config) Validate() error {
 	}
 
 	seenName := make(map[string]bool, len(c.Users))
+	// Keyed by home path so nesting can be checked against every earlier entry.
 	seenHome := make(map[string]string, len(c.Users))
 	for i := range c.Users {
 		u := &c.Users[i]
@@ -176,10 +177,22 @@ func (c *Config) Validate() error {
 		}
 		u.Home = filepath.Clean(u.Home)
 		// Two users sharing a home would silently break tenant isolation, so
-		// reject it here rather than letting it become a data leak.
-		if other, ok := seenHome[u.Home]; ok {
-			return fmt.Errorf("users[%d] (%s): home %q is already used by %q; each user needs a private directory",
-				i, u.Username, u.Home, other)
+		// reject it here rather than letting it become a data leak. So would
+		// one home containing another: the outer user would see everything
+		// belonging to the inner one, and os.Root could not prevent it because
+		// nothing would be escaping any directory.
+		for other, otherName := range seenHome {
+			switch {
+			case other == u.Home:
+				return fmt.Errorf("users[%d] (%s): home %q is already used by %q; each user needs a private directory",
+					i, u.Username, u.Home, otherName)
+			case isWithin(u.Home, other):
+				return fmt.Errorf("users[%d] (%s): home %q is inside %q, which belongs to %q; %s would be able to see their files",
+					i, u.Username, u.Home, other, otherName, otherName)
+			case isWithin(other, u.Home):
+				return fmt.Errorf("users[%d] (%s): home %q contains %q, which belongs to %q; %s would be able to see their files",
+					i, u.Username, u.Home, other, otherName, u.Username)
+			}
 		}
 		seenHome[u.Home] = u.Username
 
@@ -240,6 +253,15 @@ func (d Duration) Duration() time.Duration { return time.Duration(d) }
 
 // String renders the duration.
 func (d Duration) String() string { return time.Duration(d).String() }
+
+// isWithin reports whether child lies inside parent. Both must be cleaned
+// absolute paths.
+func isWithin(child, parent string) bool {
+	if parent == child {
+		return true
+	}
+	return strings.HasPrefix(child, strings.TrimSuffix(parent, "/")+"/")
+}
 
 // FileMode is a Unix permission bitmask parsed from an octal string such as
 // "0640". It is a distinct type because YAML's own integer parsing would read

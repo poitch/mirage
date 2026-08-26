@@ -60,7 +60,7 @@ func (u *Updater) FileWritten(ctx context.Context, user store.User, filePath str
 			MTime:       mtime,
 			ETag:        FileETag(size, mtime),
 			ContentType: contentType(name),
-		})
+		}, store.Stamp())
 		if err != nil {
 			return err
 		}
@@ -84,12 +84,12 @@ func (u *Updater) DirCreated(ctx context.Context, user store.User, dirPath strin
 		if err != nil {
 			return err
 		}
-		id, err := store.EnsureDirNode(ctx, tx, user.ID, parent.ID, dirPath, path.Base(dirPath))
+		id, err := store.EnsureDirNode(ctx, tx, user.ID, parent.ID, dirPath, path.Base(dirPath), store.Stamp())
 		if err != nil {
 			return err
 		}
 		// A new directory is empty, so its ETag is the empty-children digest.
-		if err := store.FinalizeDirNode(ctx, tx, id, DirETag(nil), 0, time.Now()); err != nil {
+		if err := store.FinalizeDirNode(ctx, tx, id, DirETag(nil), 0, time.Now(), store.Stamp()); err != nil {
 			return err
 		}
 		if err := propagate(ctx, tx, user.ID, path.Dir(dirPath)); err != nil {
@@ -187,7 +187,7 @@ func propagate(ctx context.Context, q store.Querier, userID int64, fromDir strin
 			digests = append(digests, ChildDigest{Name: c.Name, ETag: c.ETag})
 			total += c.Size
 		}
-		if err := store.FinalizeDirNode(ctx, q, node.ID, DirETag(digests), total, time.Now()); err != nil {
+		if err := store.FinalizeDirNode(ctx, q, node.ID, DirETag(digests), total, time.Now(), store.Stamp()); err != nil {
 			return err
 		}
 

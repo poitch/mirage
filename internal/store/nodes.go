@@ -116,12 +116,19 @@ func collectNodes(rows *sql.Rows) ([]Node, error) {
 	return out, rows.Err()
 }
 
+// Stamp returns a marker for the current instant, in the units scanned_at uses.
+//
+// Nanoseconds rather than seconds because a scan can begin and finish inside
+// one second, and a stamp that did not advance would make the sweep below
+// delete entries the scan had just written.
+func Stamp() int64 { return time.Now().UnixNano() }
+
 // UpsertNode inserts or updates an entry, returning its file ID.
 //
 // The conflict target is (user_id, path), and the update deliberately leaves
 // id untouched: an entry that is rewritten in place keeps the file ID clients
 // already know it by.
-func UpsertNode(ctx context.Context, q Querier, n Node) (int64, error) {
+func UpsertNode(ctx context.Context, q Querier, n Node, stamp int64) (int64, error) {
 	var parent any
 	if n.ParentID != 0 {
 		parent = n.ParentID
@@ -144,7 +151,7 @@ func UpsertNode(ctx context.Context, q Querier, n Node) (int64, error) {
 			scanned_at   = excluded.scanned_at
 		RETURNING id`,
 		n.UserID, parent, n.Path, n.Name, n.IsDir, n.Size, n.MTime.Unix(),
-		n.ETag, n.ContentType, n.Dev, n.Inode, time.Now().Unix()).Scan(&id)
+		n.ETag, n.ContentType, n.Dev, n.Inode, stamp).Scan(&id)
 	return id, err
 }
 
@@ -199,7 +206,7 @@ func CountNodes(ctx context.Context, q Querier, userID int64) (int64, error) {
 // their parent_id; FinalizeDirNode writes the ETag afterwards. Keeping the old
 // ETag in the meantime means an interrupted scan leaves a stale value rather
 // than a meaningless one.
-func EnsureDirNode(ctx context.Context, q Querier, userID, parentID int64, path, name string) (int64, error) {
+func EnsureDirNode(ctx context.Context, q Querier, userID, parentID int64, path, name string, stamp int64) (int64, error) {
 	var parent any
 	if parentID != 0 {
 		parent = parentID
@@ -209,21 +216,66 @@ func EnsureDirNode(ctx context.Context, q Querier, userID, parentID int64, path,
 		INSERT INTO nodes (user_id, parent_id, path, name, is_dir, etag, scanned_at)
 		VALUES (?, ?, ?, ?, 1, '', ?)
 		ON CONFLICT(user_id, path) DO UPDATE SET
-			parent_id = excluded.parent_id,
-			name      = excluded.name,
-			is_dir    = 1
+			parent_id  = excluded.parent_id,
+			name       = excluded.name,
+			is_dir     = 1,
+			scanned_at = excluded.scanned_at
 		RETURNING id`,
-		userID, parent, path, name, time.Now().Unix()).Scan(&id)
+		userID, parent, path, name, stamp).Scan(&id)
 	return id, err
 }
 
 // FinalizeDirNode writes a directory's derived ETag and recursive size once its
 // children have been scanned.
-func FinalizeDirNode(ctx context.Context, q Querier, id int64, etag string, size int64, mtime time.Time) error {
+func FinalizeDirNode(ctx context.Context, q Querier, id int64, etag string, size int64, mtime time.Time, stamp int64) error {
 	_, err := q.ExecContext(ctx, `
 		UPDATE nodes SET etag = ?, size = ?, mtime = ?, scanned_at = ? WHERE id = ?`,
-		etag, size, mtime.Unix(), time.Now().Unix(), id)
+		etag, size, mtime.Unix(), stamp, id)
 	return err
+}
+
+// NodeByInode finds an indexed entry by its filesystem identity.
+//
+// This is how an out-of-band rename is told apart from a delete plus a create:
+// the same (dev, inode) appearing at a new path means the file moved, and its
+// file ID should follow it.
+func NodeByInode(ctx context.Context, q Querier, userID int64, dev, inode uint64) (Node, error) {
+	if inode == 0 {
+		// Filesystems that report no inode cannot support this.
+		return Node{}, ErrNotFound
+	}
+	return scanNode(q.QueryRowContext(ctx,
+		`SELECT `+nodeColumns+` FROM nodes
+		 WHERE user_id = ? AND dev = ? AND inode = ? AND is_dir = 0
+		 LIMIT 1`, userID, dev, inode))
+}
+
+// MarkSubtreeScanned stamps a directory and everything beneath it as seen.
+//
+// It exists for a directory that could not be read: the scan has no idea what
+// is inside, so the whole subtree must be preserved rather than swept.
+func MarkSubtreeScanned(ctx context.Context, q Querier, userID int64, path string, stamp int64) error {
+	_, err := q.ExecContext(ctx, `
+		UPDATE nodes SET scanned_at = ?
+		WHERE user_id = ? AND (path = ? OR path LIKE ? ESCAPE '\')`,
+		stamp, userID, path, escapeLike(path+"/")+"%")
+	return err
+}
+
+// SweepUnscanned deletes entries a completed scan did not touch, and reports
+// how many went.
+//
+// Pruning happens once at the end rather than per directory so that a file
+// which moved is still in the index when its new location is reached. Without
+// that, whether a rename was noticed would depend on the order the tree
+// happened to be walked in.
+func SweepUnscanned(ctx context.Context, q Querier, userID int64, stamp int64) (int64, error) {
+	res, err := q.ExecContext(ctx,
+		`DELETE FROM nodes WHERE user_id = ? AND scanned_at < ?`, userID, stamp)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // MoveNode relocates an entry and rewrites the paths of everything beneath it.
