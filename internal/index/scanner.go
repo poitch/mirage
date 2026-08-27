@@ -2,6 +2,7 @@ package index
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -66,6 +67,20 @@ func (s *Scanner) ScanUser(ctx context.Context, user store.User) (Stats, error) 
 	// entry at its old path is still there when the new one is reached.
 	stamp := store.Stamp()
 
+	// A file can only be recognised as moved if the index already knows it
+	// somewhere else, so on an empty index every lookup is guaranteed to miss.
+	// Skipping them matters precisely when it is most painful: the first scan
+	// of a large share, where every name is new and so every one would ask.
+	indexed, err := store.CountNodes(ctx, s.db, user.ID)
+	if err != nil {
+		return stats, fmt.Errorf("count indexed entries for %s: %w", user.Username, err)
+	}
+	detectRenames := indexed > 0
+	if !detectRenames {
+		s.log.Info("first scan for this account; nothing can have moved yet",
+			"user", user.Username)
+	}
+
 	// The root ETag summarises the whole tree, so comparing it before and after
 	// is an exact test of whether this scan found anything. That matters
 	// because a scan runs on a timer: notifying unconditionally would wake
@@ -73,7 +88,7 @@ func (s *Scanner) ScanUser(ctx context.Context, user store.User) (Stats, error) 
 	before := s.rootETag(ctx, user.ID)
 
 	progress := s.newProgress(ctx, user.Username)
-	if _, _, err := s.scanDir(ctx, st, user, fsx.RootPath, 0, stamp, &stats, progress); err != nil {
+	if _, _, err := s.scanDir(ctx, st, user, fsx.RootPath, 0, stamp, &stats, progress, detectRenames); err != nil {
 		progress.finish(ctx, &stats, err)
 		return stats, err
 	}
@@ -103,7 +118,8 @@ func (s *Scanner) ScanUser(ctx context.Context, user store.User) (Stats, error) 
 // scanDir indexes one directory and everything beneath it, returning the
 // directory's derived ETag and its recursive size.
 func (s *Scanner) scanDir(ctx context.Context, st *fsx.Storage, user store.User,
-	dirPath string, parentID int64, stamp int64, stats *Stats, progress *progressReporter) (etag string, size int64, err error) {
+	dirPath string, parentID int64, stamp int64, stats *Stats, progress *progressReporter,
+	detectRenames bool) (etag string, size int64, err error) {
 
 	if err := ctx.Err(); err != nil {
 		return "", 0, err
@@ -167,15 +183,37 @@ func (s *Scanner) scanDir(ctx context.Context, st *fsx.Storage, user store.User,
 
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 
+	// The directory's existing entries, fetched once. Rename detection only
+	// concerns names that are new here, and asking the database per file
+	// instead would add a query for every file in the tree.
+	existing, err := store.ChildNodes(ctx, s.db, dirID)
+	if err != nil {
+		return "", 0, fmt.Errorf("read indexed children of %s: %w", dirPath, err)
+	}
+	known := make(map[string]bool, len(existing))
+	for _, c := range existing {
+		known[c.Name] = true
+	}
+
 	digests := make([]ChildDigest, 0, len(entries))
 	var total int64
+
+	// Files are collected first and written together below. Reading and
+	// writing are separated so that no filesystem I/O happens while the write
+	// transaction is open, which would hold the database's single writer lock
+	// across a disk seek.
+	type pendingFile struct {
+		node store.Node
+		etag string
+	}
+	pending := make([]pendingFile, 0, len(entries))
 
 	for _, entry := range entries {
 		childName := entry.Name()
 		childPath := fsx.Join(dirPath, childName)
 
 		if entry.IsDir() {
-			childETag, childSize, err := s.scanDir(ctx, st, user, childPath, dirID, stamp, stats, progress)
+			childETag, childSize, err := s.scanDir(ctx, st, user, childPath, dirID, stamp, stats, progress, detectRenames)
 			if err != nil {
 				return "", 0, err
 			}
@@ -200,33 +238,54 @@ func (s *Scanner) scanDir(ctx context.Context, st *fsx.Storage, user store.User,
 			continue
 		}
 
-		if moved, err := s.detectRename(ctx, st, user, childPath, childInfo); err != nil {
-			return "", 0, err
-		} else if moved {
-			stats.Moved++
+		// Only a name that is new here can be a file that moved.
+		if detectRenames && !known[childName] {
+			if moved, err := s.detectRename(ctx, st, user, childPath, childInfo); err != nil {
+				return "", 0, err
+			} else if moved {
+				stats.Moved++
+			}
 		}
 
 		childETag := FileETag(childInfo.Size(), childInfo.ModTime())
-		if _, err := store.UpsertNode(ctx, s.db, store.Node{
-			UserID:      user.ID,
-			ParentID:    dirID,
-			Path:        childPath,
-			Name:        childName,
-			IsDir:       false,
-			Size:        childInfo.Size(),
-			MTime:       childInfo.ModTime(),
-			ETag:        childETag,
-			ContentType: contentType(childName),
-			Dev:         devOf(childInfo),
-			Inode:       inodeOf(childInfo),
-		}, stamp); err != nil {
-			return "", 0, fmt.Errorf("index file %s: %w", childPath, err)
-		}
+		pending = append(pending, pendingFile{
+			node: store.Node{
+				UserID:      user.ID,
+				ParentID:    dirID,
+				Path:        childPath,
+				Name:        childName,
+				IsDir:       false,
+				Size:        childInfo.Size(),
+				MTime:       childInfo.ModTime(),
+				ETag:        childETag,
+				ContentType: contentType(childName),
+				Dev:         devOf(childInfo),
+				Inode:       inodeOf(childInfo),
+			},
+			etag: childETag,
+		})
 
 		digests = append(digests, ChildDigest{Name: childName, ETag: childETag})
 		total += childInfo.Size()
 		stats.Files++
 		stats.Bytes += childInfo.Size()
+	}
+
+	// One transaction for the whole directory. Committing per file makes the
+	// database the dominant cost of a scan; a directory at a time is a large
+	// enough batch to amortise that without holding the write lock for long.
+	if len(pending) > 0 {
+		err := s.db.Tx(ctx, func(tx *sql.Tx) error {
+			for _, pf := range pending {
+				if _, err := store.UpsertNode(ctx, tx, pf.node, stamp); err != nil {
+					return fmt.Errorf("index file %s: %w", pf.node.Path, err)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return "", 0, err
+		}
 	}
 
 	// Held only for this directory's mutation, not across the recursion above:
@@ -269,7 +328,7 @@ func (s *Scanner) ScanPath(ctx context.Context, user store.User, target string) 
 	stamp := store.Stamp()
 	var stats Stats
 	if info.IsDir() {
-		if _, _, err := s.scanDir(ctx, st, user, target, parentID, stamp, &stats, nil); err != nil {
+		if _, _, err := s.scanDir(ctx, st, user, target, parentID, stamp, &stats, nil, true); err != nil {
 			return err
 		}
 		// Scoped sweep: only entries under this subtree, since the rest of the
@@ -333,12 +392,8 @@ func (s *Scanner) sweepSubtree(ctx context.Context, user store.User, target stri
 func (s *Scanner) detectRename(ctx context.Context, st *fsx.Storage, user store.User,
 	newPath string, info fs.FileInfo) (bool, error) {
 
-	if _, err := store.NodeByPath(ctx, s.db, user.ID, newPath); err == nil {
-		return false, nil // already indexed here; nothing moved
-	} else if !errors.Is(err, store.ErrNotFound) {
-		return false, err
-	}
-
+	// Callers establish that the path is not already indexed before asking, so
+	// that is deliberately not re-checked here.
 	dev, inode, ok := fsx.Identity(info)
 	if !ok || inode == 0 {
 		return false, nil
