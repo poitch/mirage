@@ -137,6 +137,16 @@ CREATE TABLE settings (
     value TEXT NOT NULL
 );
 `,
+	// 4: mark directories whose contents were fully read.
+	//
+	// A directory row is written before its children are scanned, so its mere
+	// presence says nothing about whether the subtree beneath it was finished.
+	// Recording that explicitly lets an interrupted scan resume: a directory
+	// already completed under the same scan generation can be skipped whole,
+	// instead of the walk starting again from the top.
+	`
+ALTER TABLE nodes ADD COLUMN complete INTEGER NOT NULL DEFAULT 0;
+`,
 }
 
 // migrate applies any migrations the database has not yet seen.

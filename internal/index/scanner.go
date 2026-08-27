@@ -48,7 +48,10 @@ type Stats struct {
 	// SkippedLinks counts symbolic links that were not followed. On a NAS these
 	// are usually links into shared folders outside the account's directory.
 	SkippedLinks int64
-	Duration     time.Duration
+	// Resumed counts directories skipped because an interrupted scan had
+	// already finished reading them under the same generation.
+	Resumed  int64
+	Duration time.Duration
 }
 
 // ScanUser walks a user's home directory and brings their index up to date.
@@ -65,20 +68,34 @@ func (s *Scanner) ScanUser(ctx context.Context, user store.User) (Stats, error) 
 	// still carries an older one at the end is gone from disk. Sweeping at the
 	// end rather than per directory is what lets a moved file keep its ID: the
 	// entry at its old path is still there when the new one is reached.
+	// A scan that was interrupted is picked up rather than started again. It
+	// keeps the generation marker it was using, so every directory it already
+	// finished is recognisable and can be skipped whole - which on a large
+	// share is the difference between resuming and repeating an hour of work.
 	stamp := store.Stamp()
+	resuming := false
+	detectRenames := false
 
-	// A file can only be recognised as moved if the index already knows it
-	// somewhere else, so on an empty index every lookup is guaranteed to miss.
-	// Skipping them matters precisely when it is most painful: the first scan
-	// of a large share, where every name is new and so every one would ask.
-	indexed, err := store.CountNodes(ctx, s.db, user.ID)
-	if err != nil {
-		return stats, fmt.Errorf("count indexed entries for %s: %w", user.Username, err)
-	}
-	detectRenames := indexed > 0
-	if !detectRenames {
-		s.log.Info("first scan for this account; nothing can have moved yet",
-			"user", user.Username)
+	if prev, ok, err := ScanProgress(ctx, s.db); err != nil {
+		return stats, err
+	} else if ok && prev.Resumable(user.Username) {
+		stamp, resuming, detectRenames = prev.Stamp, true, prev.DetectRenames
+		s.log.Info("resuming the interrupted scan",
+			"user", user.Username, "already_indexed", prev.Files+prev.Dirs)
+	} else {
+		// A file can only be recognised as moved if the index already knows it
+		// somewhere else, so on an empty index every lookup is guaranteed to
+		// miss. Skipping them matters precisely when it is most painful: the
+		// first scan of a large share, where every name is new.
+		indexed, err := store.CountNodes(ctx, s.db, user.ID)
+		if err != nil {
+			return stats, fmt.Errorf("count indexed entries for %s: %w", user.Username, err)
+		}
+		detectRenames = indexed > 0
+		if !detectRenames {
+			s.log.Info("first scan for this account; nothing can have moved yet",
+				"user", user.Username)
+		}
 	}
 
 	// The root ETag summarises the whole tree, so comparing it before and after
@@ -87,8 +104,8 @@ func (s *Scanner) ScanUser(ctx context.Context, user store.User) (Stats, error) 
 	// every client every interval for nothing.
 	before := s.rootETag(ctx, user.ID)
 
-	progress := s.newProgress(ctx, user.Username)
-	if _, _, err := s.scanDir(ctx, st, user, fsx.RootPath, 0, stamp, &stats, progress, detectRenames); err != nil {
+	progress := s.newProgress(ctx, user.Username, stamp, detectRenames)
+	if _, _, err := s.scanDir(ctx, st, user, fsx.RootPath, 0, stamp, &stats, progress, detectRenames, resuming); err != nil {
 		progress.finish(ctx, &stats, err)
 		return stats, err
 	}
@@ -111,7 +128,7 @@ func (s *Scanner) ScanUser(ctx context.Context, user store.User) (Stats, error) 
 		"user", user.Username, "files", stats.Files, "dirs", stats.Dirs,
 		"bytes", stats.Bytes, "moved", stats.Moved, "removed", stats.Removed,
 		"skipped", stats.Skipped, "skipped_links", stats.SkippedLinks,
-		"duration", stats.Duration)
+		"resumed", stats.Resumed, "duration", stats.Duration)
 	return stats, nil
 }
 
@@ -119,13 +136,32 @@ func (s *Scanner) ScanUser(ctx context.Context, user store.User) (Stats, error) 
 // directory's derived ETag and its recursive size.
 func (s *Scanner) scanDir(ctx context.Context, st *fsx.Storage, user store.User,
 	dirPath string, parentID int64, stamp int64, stats *Stats, progress *progressReporter,
-	detectRenames bool) (etag string, size int64, err error) {
+	detectRenames, resuming bool) (etag string, size int64, err error) {
 
 	if err := ctx.Err(); err != nil {
 		return "", 0, err
 	}
 	if progress != nil {
 		progress.update(ctx, stats, dirPath)
+	}
+
+	// A directory already finished under this generation was completed by the
+	// interrupted pass, so the whole subtree beneath it can be skipped.
+	if resuming {
+		if prev, err := store.NodeByPath(ctx, s.db, user.ID, dirPath); err == nil &&
+			prev.IsDir && prev.Complete && prev.ScannedAt == stamp {
+			// Everything under a skipped subtree is re-stamped as seen. In
+			// principle finishing a directory already stamped its contents, so
+			// this is redundant - but the end-of-scan sweep deletes whatever
+			// carries an older mark, and if that invariant were ever wrong the
+			// result would be entries disappearing from the index and clients
+			// deleting the files. Not worth resting on.
+			if err := store.MarkSubtreeScanned(ctx, s.db, user.ID, dirPath, stamp); err != nil {
+				return "", 0, fmt.Errorf("preserve resumed subtree %s: %w", dirPath, err)
+			}
+			stats.Resumed++
+			return prev.ETag, prev.Size, nil
+		}
 	}
 
 	info, err := st.Stat(dirPath)
@@ -213,7 +249,7 @@ func (s *Scanner) scanDir(ctx context.Context, st *fsx.Storage, user store.User,
 		childPath := fsx.Join(dirPath, childName)
 
 		if entry.IsDir() {
-			childETag, childSize, err := s.scanDir(ctx, st, user, childPath, dirID, stamp, stats, progress, detectRenames)
+			childETag, childSize, err := s.scanDir(ctx, st, user, childPath, dirID, stamp, stats, progress, detectRenames, resuming)
 			if err != nil {
 				return "", 0, err
 			}
@@ -328,7 +364,7 @@ func (s *Scanner) ScanPath(ctx context.Context, user store.User, target string) 
 	stamp := store.Stamp()
 	var stats Stats
 	if info.IsDir() {
-		if _, _, err := s.scanDir(ctx, st, user, target, parentID, stamp, &stats, nil, true); err != nil {
+		if _, _, err := s.scanDir(ctx, st, user, target, parentID, stamp, &stats, nil, true, false); err != nil {
 			return err
 		}
 		// Scoped sweep: only entries under this subtree, since the rest of the
@@ -376,10 +412,14 @@ func (s *Scanner) rootETag(ctx context.Context, userID int64) string {
 func (s *Scanner) sweepSubtree(ctx context.Context, user store.User, target string, stamp int64) error {
 	unlock := indexLocks.lock(user.ID)
 	defer unlock()
+	lo, hi, ok := store.PrefixRange(target + "/")
+	if !ok {
+		return nil
+	}
 	_, err := s.db.ExecContext(ctx, `
 		DELETE FROM nodes
-		WHERE user_id = ? AND scanned_at < ? AND path LIKE ? ESCAPE '\'`,
-		user.ID, stamp, escapeLikePrefix(target)+"/%")
+		WHERE user_id = ? AND scanned_at < ? AND path >= ? AND path < ?`,
+		user.ID, stamp, lo, hi)
 	return err
 }
 

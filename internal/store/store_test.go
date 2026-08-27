@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -259,5 +260,75 @@ func TestConfigDisableIsLifted(t *testing.T) {
 	bob, _ = db.UserByName(ctx, "bob")
 	if bob.Disabled || bob.DisabledReason != "" {
 		t.Errorf("bob: disabled=%v reason=%q, want re-enabled", bob.Disabled, bob.DisabledReason)
+	}
+}
+
+// TestPrefixRange checks the range that replaces LIKE for subtree queries.
+// SQLite will not use an index for a LIKE pattern by default, so every subtree
+// query was scanning the whole table - invisible until the table is large.
+func TestPrefixRange(t *testing.T) {
+	lo, hi, ok := PrefixRange("docs/")
+	if !ok {
+		t.Fatal("PrefixRange(\"docs/\") reported no range")
+	}
+	if lo != "docs/" {
+		t.Errorf("lo = %q, want %q", lo, "docs/")
+	}
+	// '/' is 0x2F, so the bound is '0'. Everything under docs/ sorts below it.
+	if hi != "docs0" {
+		t.Errorf("hi = %q, want %q", hi, "docs0")
+	}
+
+	within := []string{"docs/a", "docs/nested/deep.txt", "docs/~", "docs/\xff"}
+	for _, p := range within {
+		if !(p >= lo && p < hi) {
+			t.Errorf("%q is under docs/ but falls outside [%q, %q)", p, lo, hi)
+		}
+	}
+	// A sibling sharing the prefix as text must not be caught.
+	outside := []string{"docs", "docs-copy/a", "docs0", "documents/a", "e"}
+	for _, p := range outside {
+		if p >= lo && p < hi {
+			t.Errorf("%q is not under docs/ but falls inside [%q, %q)", p, lo, hi)
+		}
+	}
+
+	if _, _, ok := PrefixRange(""); ok {
+		t.Error("an empty prefix should report no range")
+	}
+}
+
+// TestSubtreeNodesUsesAnIndex is the reason the range exists: confirm SQLite
+// plans an index search rather than a full scan.
+func TestSubtreeNodesUsesAnIndex(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	if _, err := db.ReconcileUsers(ctx, []UserMapping{{Username: "u", Home: "/h"}}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	u, _ := db.UserByName(ctx, "u")
+
+	lo, hi, _ := PrefixRange("docs/")
+	rows, err := db.QueryContext(ctx, `
+		EXPLAIN QUERY PLAN
+		SELECT id FROM nodes WHERE user_id = ? AND path >= ? AND path < ? ORDER BY path`,
+		u.ID, lo, hi)
+	if err != nil {
+		t.Fatalf("explain: %v", err)
+	}
+	defer rows.Close()
+
+	var plan string
+	for rows.Next() {
+		var a, b, c int
+		var detail string
+		if err := rows.Scan(&a, &b, &c, &detail); err != nil {
+			t.Fatalf("scan plan: %v", err)
+		}
+		plan += detail + "\n"
+	}
+	if strings.Contains(plan, "SCAN nodes") && !strings.Contains(plan, "USING INDEX") &&
+		!strings.Contains(plan, "USING COVERING INDEX") {
+		t.Errorf("subtree query does a full table scan:\n%s", plan)
 	}
 }

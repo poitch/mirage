@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/poitch/mirage/internal/fsx"
 	"github.com/poitch/mirage/internal/store"
@@ -470,5 +471,105 @@ func TestInterruptedScanLeavesNoEpochZeroRows(t *testing.T) {
 		if n.ETag == "" {
 			t.Errorf("%q still has an empty ETag after a rescan", p)
 		}
+	}
+}
+
+// TestInterruptedScanResumes is the property that matters on a large share: a
+// scan stopped partway must pick up where it left off rather than repeat an
+// hour of work, and must still produce exactly the index a single
+// uninterrupted pass would have.
+func TestInterruptedScanResumes(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+
+	// A complete pass, to know what the answer should be.
+	f.scan(t)
+	want := map[string]string{}
+	for _, p := range []string{".", "docs", "docs/nested", "top.txt", "docs/report.txt", "docs/nested/deep.txt"} {
+		want[p] = f.node(t, p).ETag
+	}
+
+	// Simulate a scan interrupted after finishing docs/nested but nothing else.
+	// A real scan stamps a directory's contents before finishing the directory,
+	// so the subtree is stamped here too.
+	stamp := store.Stamp()
+	if _, err := f.db.ExecContext(ctx,
+		`UPDATE nodes SET complete = 0, scanned_at = 0 WHERE user_id = ?`, f.user.ID); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	for _, p := range []string{"docs/nested", "docs/nested/deep.txt"} {
+		n := f.node(t, p)
+		if _, err := f.db.ExecContext(ctx,
+			`UPDATE nodes SET complete = 1, scanned_at = ? WHERE id = ?`, stamp, n.ID); err != nil {
+			t.Fatalf("mark %s: %v", p, err)
+		}
+	}
+	writeProgress(t, f, Progress{
+		User: f.user.Username, State: StateInterrupted, Stamp: stamp,
+		StartedAt: time.Now().Add(-time.Minute), UpdatedAt: time.Now().Add(-time.Minute),
+	})
+
+	stats, err := f.scanner.ScanUser(ctx, f.user)
+	if err != nil {
+		t.Fatalf("resumed scan: %v", err)
+	}
+	if stats.Resumed != 1 {
+		t.Errorf("Resumed = %d, want 1: the finished subtree should have been skipped", stats.Resumed)
+	}
+
+	// The resumed pass must arrive at the same index as an uninterrupted one.
+	for p, etag := range want {
+		if got := f.node(t, p).ETag; got != etag {
+			t.Errorf("%q: ETag after resume = %q, want %q", p, got, etag)
+		}
+	}
+	// And it must have completed, rather than leaving the record interrupted.
+	final, _, err := ScanProgress(ctx, f.db)
+	if err != nil {
+		t.Fatalf("ScanProgress: %v", err)
+	}
+	if final.State != StateDone {
+		t.Errorf("State = %q after a resumed scan, want %q", final.State, StateDone)
+	}
+}
+
+// TestResumeDoesNotSweepUnvisitedEntries guards the dangerous interaction: the
+// end-of-scan sweep deletes anything not carrying the current generation mark,
+// and a resumed scan deliberately does not revisit completed subtrees.
+//
+// The directory alone is marked complete here, with its contents left unmarked.
+// A real scan would have stamped them, so this is a state that should not
+// arise - which is the point: if it ever did, entries would vanish from the
+// index and clients would delete the files. Resuming re-stamps the subtree
+// rather than trusting that.
+func TestResumeDoesNotSweepUnvisitedEntries(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	f.scan(t)
+
+	stamp := store.Stamp()
+	if _, err := f.db.ExecContext(ctx,
+		`UPDATE nodes SET complete = 0, scanned_at = 0 WHERE user_id = ?`, f.user.ID); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	for _, p := range []string{"docs/nested"} {
+		n := f.node(t, p)
+		if _, err := f.db.ExecContext(ctx,
+			`UPDATE nodes SET complete = 1, scanned_at = ? WHERE id = ?`, stamp, n.ID); err != nil {
+			t.Fatalf("mark %s: %v", p, err)
+		}
+	}
+	writeProgress(t, f, Progress{
+		User: f.user.Username, State: StateInterrupted, Stamp: stamp,
+		StartedAt: time.Now().Add(-time.Minute), UpdatedAt: time.Now().Add(-time.Minute),
+	})
+
+	if _, err := f.scanner.ScanUser(ctx, f.user); err != nil {
+		t.Fatalf("resumed scan: %v", err)
+	}
+	// The file inside the skipped subtree was never revisited, and must not
+	// have been swept as though it had vanished from disk.
+	if _, err := store.NodeByPath(ctx, f.db, f.user.ID, "docs/nested/deep.txt"); err != nil {
+		t.Fatalf("a resumed scan swept an entry inside a completed subtree: %v", err)
 	}
 }

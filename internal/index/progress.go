@@ -39,15 +39,22 @@ const (
 
 // Progress is a point-in-time view of a scan.
 type Progress struct {
-	User      string    `json:"user"`
-	State     string    `json:"state"`
-	Files     int64     `json:"files"`
-	Dirs      int64     `json:"dirs"`
-	Bytes     int64     `json:"bytes"`
-	Current   string    `json:"current"`
-	Error     string    `json:"error,omitempty"`
-	StartedAt time.Time `json:"started_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	User    string `json:"user"`
+	State   string `json:"state"`
+	Files   int64  `json:"files"`
+	Dirs    int64  `json:"dirs"`
+	Bytes   int64  `json:"bytes"`
+	Current string `json:"current"`
+	Error   string `json:"error,omitempty"`
+	// Stamp is the scan generation. Keeping it lets an interrupted scan be
+	// resumed under the same generation, so directories it already finished
+	// can be recognised and skipped rather than walked again.
+	Stamp int64 `json:"stamp"`
+	// DetectRenames records the decision made when the scan began, so a resume
+	// does not switch it on merely because the partial index is now non-empty.
+	DetectRenames bool      `json:"detect_renames"`
+	StartedAt     time.Time `json:"started_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 // Running reports whether a scan is in progress.
@@ -74,6 +81,19 @@ func (p Progress) Rate() float64 {
 	return float64(p.Files+p.Dirs) / seconds
 }
 
+// Resumable reports whether a previous scan can be picked up rather than
+// started again.
+//
+// Any unfinished scan qualifies, not only one already reconciled as
+// interrupted. A scan killed outright leaves its record saying "running",
+// because a process that is killed writes nothing more - and whether some
+// later startup has relabelled that yet is beside the point. If a new scan of
+// this account is beginning, whatever came before it is over.
+func (p Progress) Resumable(username string) bool {
+	return p.User == username && p.Stamp > 0 &&
+		(p.State == StateRunning || p.State == StateInterrupted)
+}
+
 // ScanProgress returns the most recent scan progress, if any has been recorded.
 func ScanProgress(ctx context.Context, db *store.DB) (Progress, bool, error) {
 	raw, err := db.Setting(ctx, progressKey)
@@ -94,11 +114,14 @@ type progressReporter struct {
 	lastAt  time.Time
 }
 
-func (s *Scanner) newProgress(ctx context.Context, username string) *progressReporter {
+func (s *Scanner) newProgress(ctx context.Context, username string, stamp int64, detectRenames bool) *progressReporter {
 	now := time.Now()
 	r := &progressReporter{
 		scanner: s,
-		current: Progress{User: username, State: StateRunning, StartedAt: now, UpdatedAt: now},
+		current: Progress{
+			User: username, State: StateRunning, Stamp: stamp, DetectRenames: detectRenames,
+			StartedAt: now, UpdatedAt: now,
+		},
 	}
 	// Written immediately, so that a process dying at any point from here on
 	// leaves a record saying a scan was running.

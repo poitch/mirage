@@ -28,6 +28,12 @@ type Node struct {
 	ContentType string
 	Dev         uint64
 	Inode       uint64
+	// ScannedAt is the generation marker of the scan that last touched this
+	// entry, and Complete reports whether that scan finished reading it. For a
+	// directory the two together answer "was this subtree finished during the
+	// current pass", which is what makes an interrupted scan resumable.
+	ScannedAt int64
+	Complete  bool
 }
 
 // Querier is satisfied by both *sql.DB and *sql.Tx, so index operations can run
@@ -38,13 +44,14 @@ type Querier interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-const nodeColumns = `id, user_id, COALESCE(parent_id, 0), path, name, is_dir, size, mtime, etag, content_type, dev, inode`
+const nodeColumns = `id, user_id, COALESCE(parent_id, 0), path, name, is_dir, size, mtime, etag, content_type, dev, inode, scanned_at, complete`
 
 func scanNode(row interface{ Scan(...any) error }) (Node, error) {
 	var n Node
 	var mtime int64
 	err := row.Scan(&n.ID, &n.UserID, &n.ParentID, &n.Path, &n.Name,
-		&n.IsDir, &n.Size, &mtime, &n.ETag, &n.ContentType, &n.Dev, &n.Inode)
+		&n.IsDir, &n.Size, &mtime, &n.ETag, &n.ContentType, &n.Dev, &n.Inode,
+		&n.ScannedAt, &n.Complete)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Node{}, ErrNotFound
 	}
@@ -83,24 +90,56 @@ func ChildNodes(ctx context.Context, q Querier, parentID int64) ([]Node, error) 
 func SubtreeNodes(ctx context.Context, q Querier, userID int64, path string) ([]Node, error) {
 	// LIKE with an escaped prefix, so a directory named "a%b" cannot match
 	// unrelated siblings.
-	prefix := ""
-	if path != "." {
-		prefix = path + "/"
+	if path == "." {
+		rows, err := q.QueryContext(ctx,
+			`SELECT `+nodeColumns+` FROM nodes
+			 WHERE user_id = ? AND path <> '.' ORDER BY path`, userID)
+		if err != nil {
+			return nil, err
+		}
+		return collectNodes(rows)
+	}
+
+	lo, hi, ok := PrefixRange(path + "/")
+	if !ok {
+		return nil, nil
 	}
 	rows, err := q.QueryContext(ctx,
 		`SELECT `+nodeColumns+` FROM nodes
-		 WHERE user_id = ? AND path <> '.' AND path LIKE ? ESCAPE '\'
-		 ORDER BY path`,
-		userID, escapeLike(prefix)+"%")
+		 WHERE user_id = ? AND path >= ? AND path < ? ORDER BY path`,
+		userID, lo, hi)
 	if err != nil {
 		return nil, err
 	}
 	return collectNodes(rows)
 }
 
-func escapeLike(s string) string {
-	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
-	return r.Replace(s)
+// prefixRange turns a path prefix into the half-open range [lo, hi) that
+// contains exactly the paths starting with it.
+//
+// This exists instead of LIKE because SQLite will not use an index for a LIKE
+// pattern unless the column's collation is NOCASE - its LIKE is
+// case-insensitive for ASCII by default, which disables the optimisation. Every
+// subtree query was therefore scanning the whole table, which is invisible
+// until the table has a million rows in it. A range comparison uses the
+// (user_id, path) index directly.
+//
+// hi is the prefix with its last byte incremented, so it sorts immediately
+// after every string beginning with the prefix.
+func PrefixRange(prefix string) (lo, hi string, ok bool) {
+	if prefix == "" {
+		return "", "", false
+	}
+	upper := []byte(prefix)
+	for i := len(upper) - 1; i >= 0; i-- {
+		if upper[i] < 0xFF {
+			upper[i]++
+			return prefix, string(upper[:i+1]), true
+		}
+	}
+	// Every byte was 0xFF, so nothing sorts after it; the caller falls back to
+	// an open-ended range.
+	return prefix, "", false
 }
 
 func collectNodes(rows *sql.Rows) ([]Node, error) {
@@ -136,8 +175,8 @@ func UpsertNode(ctx context.Context, q Querier, n Node, stamp int64) (int64, err
 	var id int64
 	err := q.QueryRowContext(ctx, `
 		INSERT INTO nodes (user_id, parent_id, path, name, is_dir, size, mtime,
-		                   etag, content_type, dev, inode, scanned_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                   etag, content_type, dev, inode, scanned_at, complete)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
 		ON CONFLICT(user_id, path) DO UPDATE SET
 			parent_id    = excluded.parent_id,
 			name         = excluded.name,
@@ -148,7 +187,8 @@ func UpsertNode(ctx context.Context, q Querier, n Node, stamp int64) (int64, err
 			content_type = excluded.content_type,
 			dev          = excluded.dev,
 			inode        = excluded.inode,
-			scanned_at   = excluded.scanned_at
+			scanned_at   = excluded.scanned_at,
+			complete     = 1
 		RETURNING id`,
 		n.UserID, parent, n.Path, n.Name, n.IsDir, n.Size, n.MTime.Unix(),
 		n.ETag, n.ContentType, n.Dev, n.Inode, stamp).Scan(&id)
@@ -235,6 +275,9 @@ func EnsureDirNode(ctx context.Context, q Querier, userID, parentID int64, path,
 			is_dir     = 1,
 			etag       = CASE WHEN nodes.etag = ''  THEN excluded.etag  ELSE nodes.etag  END,
 			mtime      = CASE WHEN nodes.mtime <= 0 THEN excluded.mtime ELSE nodes.mtime END,
+			-- Reading a directory again means its contents are being re-read,
+			-- so it is no longer known-complete until finalised once more.
+			complete   = 0,
 			scanned_at = excluded.scanned_at
 		RETURNING id`,
 		userID, parent, path, name, mtime.Unix(), provisionalETag, stamp).Scan(&id)
@@ -243,9 +286,12 @@ func EnsureDirNode(ctx context.Context, q Querier, userID, parentID int64, path,
 
 // FinalizeDirNode writes a directory's derived ETag and recursive size once its
 // children have been scanned.
+// FinalizeDirNode writes a directory's derived ETag and recursive size once its
+// children have been scanned, and marks the subtree as fully read.
 func FinalizeDirNode(ctx context.Context, q Querier, id int64, etag string, size int64, mtime time.Time, stamp int64) error {
 	_, err := q.ExecContext(ctx, `
-		UPDATE nodes SET etag = ?, size = ?, mtime = ?, scanned_at = ? WHERE id = ?`,
+		UPDATE nodes SET etag = ?, size = ?, mtime = ?, scanned_at = ?, complete = 1
+		WHERE id = ?`,
 		etag, size, mtime.Unix(), stamp, id)
 	return err
 }
@@ -271,10 +317,21 @@ func NodeByInode(ctx context.Context, q Querier, userID int64, dev, inode uint64
 // It exists for a directory that could not be read: the scan has no idea what
 // is inside, so the whole subtree must be preserved rather than swept.
 func MarkSubtreeScanned(ctx context.Context, q Querier, userID int64, path string, stamp int64) error {
+	if path == "." {
+		_, err := q.ExecContext(ctx,
+			`UPDATE nodes SET scanned_at = ? WHERE user_id = ?`, stamp, userID)
+		return err
+	}
+	lo, hi, ok := PrefixRange(path + "/")
+	if !ok {
+		_, err := q.ExecContext(ctx,
+			`UPDATE nodes SET scanned_at = ? WHERE user_id = ? AND path = ?`, stamp, userID, path)
+		return err
+	}
 	_, err := q.ExecContext(ctx, `
 		UPDATE nodes SET scanned_at = ?
-		WHERE user_id = ? AND (path = ? OR path LIKE ? ESCAPE '\')`,
-		stamp, userID, path, escapeLike(path+"/")+"%")
+		WHERE user_id = ? AND (path = ? OR (path >= ? AND path < ?))`,
+		stamp, userID, path, lo, hi)
 	return err
 }
 
@@ -315,9 +372,13 @@ func MoveNode(ctx context.Context, q Querier, userID int64, oldPath, newPath str
 	// Descendants keep their parent_id chain; only the textual path shifts.
 	// substr is 1-indexed, so len(oldPath)+1 starts at the separator that
 	// follows the old prefix.
+	lo, hi, ok := PrefixRange(oldPath + "/")
+	if !ok {
+		return nil
+	}
 	_, err := q.ExecContext(ctx, `
 		UPDATE nodes SET path = ? || substr(path, ?)
-		WHERE user_id = ? AND path LIKE ? ESCAPE '\'`,
-		newPath, len(oldPath)+1, userID, escapeLike(oldPath+"/")+"%")
+		WHERE user_id = ? AND path >= ? AND path < ?`,
+		newPath, len(oldPath)+1, userID, lo, hi)
 	return err
 }
