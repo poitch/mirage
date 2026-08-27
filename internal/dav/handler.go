@@ -1,12 +1,14 @@
 package dav
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/poitch/mirage/internal/auth"
 	"github.com/poitch/mirage/internal/fsx"
@@ -273,9 +275,29 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request, user store.U
 		return
 	}
 
+	// The ETag is recomputed from the file being served rather than taken from
+	// the index.
+	//
+	// They can disagree. A file rewritten in place under the same name leaves
+	// its directory's timestamp untouched, so a quick pass cannot see it and
+	// the index stays behind until the next full rescan. Serving the index's
+	// ETag alongside the real file's bytes would then answer a conditional
+	// request with 304 Not Modified for content that had in fact changed - so a
+	// client keeping a local copy would never refresh it.
+	//
+	// The stat needed for this has already happened, so the check is free, and
+	// a disagreement is worth correcting for everyone rather than only for the
+	// client that happened to ask.
+	etag := index.FileETag(info.Size(), info.ModTime())
+	if etag != node.ETag {
+		h.log.Info("file changed since it was indexed; correcting the index",
+			"user", user.Username, "path", path)
+		h.reindexInBackground(user, path, info.Size(), info.ModTime())
+	}
+
 	// Clients read these back on upload and download to confirm identity.
-	w.Header().Set("ETag", `"`+node.ETag+`"`)
-	w.Header().Set("OC-ETag", `"`+node.ETag+`"`)
+	w.Header().Set("ETag", `"`+etag+`"`)
+	w.Header().Set("OC-ETag", `"`+etag+`"`)
 	w.Header().Set("OC-FileId", fmt.Sprintf("%08d%s", node.ID, h.instanceID))
 	if node.ContentType != "" {
 		w.Header().Set("Content-Type", node.ContentType)
@@ -284,6 +306,23 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request, user store.U
 	// ServeContent handles Range, If-Range and If-None-Match, which is what
 	// makes an interrupted download resumable.
 	http.ServeContent(w, r, node.Name, info.ModTime(), f)
+}
+
+// reindexInBackground corrects one file's index entry without delaying the
+// response that noticed the problem.
+//
+// Detached from the request context on purpose: the client has what it asked
+// for and may disconnect immediately, but the correction is for every other
+// client too and should not be abandoned with it.
+func (h *Handler) reindexInBackground(user store.User, path string, size int64, mtime time.Time) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if _, err := h.updater.FileWritten(ctx, user, path, size, mtime); err != nil {
+			h.log.Warn("could not correct the index for a file that changed on disk",
+				"user", user.Username, "path", path, "error", err)
+		}
+	}()
 }
 
 func (h *Handler) internalError(w http.ResponseWriter, what string, err error) {

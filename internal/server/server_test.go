@@ -933,3 +933,64 @@ func TestStatusAndCapabilitiesNeedNoAuth(t *testing.T) {
 		resp.Body.Close()
 	}
 }
+
+// TestGetServesLiveContentAndCorrectsTheIndex covers the one change no
+// directory-level poll can see: a file rewritten in place under the same name,
+// which leaves its directory's timestamp untouched.
+//
+// Contents come from the file itself, so a client always reads what is actually
+// there. The risk is the ETag: served from a stale index it would answer a
+// conditional request with 304, and a client holding a local copy would never
+// refresh it.
+func TestGetServesLiveContentAndCorrectsTheIndex(t *testing.T) {
+	h := newHarness(t)
+	path := "/remote.php/dav/files/alice/hello.txt"
+
+	resp := h.do(http.MethodGet, path, "alice", alicePassword, "", nil)
+	firstETag := resp.Header.Get("ETag")
+	if body := readBody(t, resp); body != "hello from alice" {
+		t.Fatalf("body = %q", body)
+	}
+
+	// Rewritten behind Mirage's back, with the directory's timestamp restored
+	// so no directory-level check could notice.
+	dir := h.homes["alice"]
+	dirInfo, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	writeFile(t, filepath.Join(dir, "hello.txt"), "rewritten in place, same name")
+	if err := os.Chtimes(dir, dirInfo.ModTime(), dirInfo.ModTime()); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	resp = h.do(http.MethodGet, path, "alice", alicePassword, "", nil)
+	secondETag := resp.Header.Get("ETag")
+	if body := readBody(t, resp); body != "rewritten in place, same name" {
+		t.Errorf("served stale content: %q", body)
+	}
+	if secondETag == firstETag {
+		t.Error("the ETag did not change, so a conditional request would answer 304 for changed content")
+	}
+
+	// A client revalidating with the old ETag must be given the new content,
+	// not told it is unchanged.
+	resp = h.do(http.MethodGet, path, "alice", alicePassword, "",
+		map[string]string{"If-None-Match": firstETag})
+	if resp.StatusCode == http.StatusNotModified {
+		t.Error("a stale ETag was answered with 304 for content that had changed")
+	}
+	resp.Body.Close()
+
+	// And the correction reaches the index, so other clients see it in a
+	// listing rather than only the one that happened to read the file.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		n, err := store.NodeByPath(context.Background(), h.db, aliceID(t, h), "hello.txt")
+		if err == nil && n.ETag == strings.Trim(secondETag, `"`) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Error("the index was never corrected for a file that changed on disk")
+}
