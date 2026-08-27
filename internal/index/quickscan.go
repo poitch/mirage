@@ -2,35 +2,37 @@ package index
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
 	"path"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/poitch/mirage/internal/fsx"
 	"github.com/poitch/mirage/internal/store"
 )
 
-// QuickScanUser finds files added, removed or renamed without stat'ing every
-// file in the share.
+// QuickScanUser finds files added, removed or renamed without reading the
+// share.
 //
-// A full pass over a few million files takes long enough that running it often
-// is unreasonable, yet a file dropped over SMB should appear on clients within
-// minutes. Where the kernel cannot watch every directory - a few hundred
-// thousand of them exceeds any sane inotify limit - this is what closes that
-// gap.
+// Two facts make this possible. A directory's modification time moves whenever
+// an entry is added, removed or renamed inside it. And the index already knows
+// every directory, so the tree does not need walking to find them.
 //
-// It works from one fact: a directory's modification time changes when an entry
-// is added, removed or renamed inside it. So the tree can be walked comparing
-// only directory timestamps, and the expensive per-file work done solely for
-// the directories that actually moved.
+// So a pass is one stat per indexed directory - no directory listings, no file
+// stats, and no database work at all unless something moved. It costs the same
+// whether the share holds a hundred files or ten million, because it scales
+// with the number of directories rather than the number of files, and a stat
+// of a directory whose metadata the kernel already has cached is close to free.
 //
 // What it cannot see is a file rewritten in place under the same name, which
-// leaves its directory's timestamp untouched. The full rescan remains the
-// backstop for those, and the filesystem watcher catches them live wherever it
-// has a watch.
+// leaves its directory's timestamp untouched. That matters less than it sounds:
+// a client reading a file fetches it from disk, so it always gets the current
+// contents. What a stale index costs is a missing entry in a listing, and those
+// are exactly what this catches. The full rescan remains the backstop.
 func (s *Scanner) QuickScanUser(ctx context.Context, user store.User) (Stats, error) {
 	start := time.Now()
 	var stats Stats
@@ -40,149 +42,244 @@ func (s *Scanner) QuickScanUser(ctx context.Context, user store.User) (Stats, er
 		return stats, fmt.Errorf("open storage for %s: %w", user.Username, err)
 	}
 
-	// Every indexed directory, in one query. The walk below then compares
-	// timestamps without going near the database again.
+	// Every indexed directory, in one query. Nothing below touches the database
+	// again unless a directory turns out to have changed.
 	indexed, err := store.IndexedDirs(ctx, s.db, user.ID)
 	if err != nil {
 		return stats, fmt.Errorf("read indexed directories for %s: %w", user.Username, err)
 	}
 	if len(indexed) == 0 {
-		// Nothing to compare against; a full pass has to establish the picture.
-		s.log.Info("no index yet for this account; a quick pass has nothing to compare",
+		s.log.Debug("no index yet for this account; a quick pass has nothing to compare",
 			"user", user.Username)
 		return stats, nil
 	}
 
-	changed, err := s.findChangedDirs(ctx, st, user, indexed, &stats)
-	if err != nil {
-		return stats, err
+	changed := make([]string, 0, 16)
+	for dirPath, prev := range indexed {
+		if err := ctx.Err(); err != nil {
+			return stats, err
+		}
+		stats.Dirs++
+
+		info, err := st.Stat(dirPath)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				// Gone. Its parent's timestamp moved when it went, so the
+				// parent is queued too and will prune it; queueing the parent
+				// explicitly covers a filesystem that did not update it.
+				changed = append(changed, parentOfPath(dirPath))
+			}
+			continue
+		}
+		if !info.IsDir() {
+			changed = append(changed, parentOfPath(dirPath))
+			continue
+		}
+		if prev.Changed(info.ModTime()) {
+			changed = append(changed, dirPath)
+		}
 	}
 
-	// Deepest first, so a directory's children are settled before its own ETag
-	// is derived from them.
-	sort.Slice(changed, func(i, j int) bool {
-		return depth(changed[i]) > depth(changed[j])
-	})
+	changed = dedupe(changed)
+	// Deepest first, so a directory's children are settled before the ETags
+	// above it are derived from them.
+	sort.Slice(changed, func(i, j int) bool { return depth(changed[i]) > depth(changed[j]) })
 
 	for _, dirPath := range changed {
 		if err := ctx.Err(); err != nil {
 			return stats, err
 		}
-		if err := s.rescanOneDirectory(ctx, st, user, dirPath, &stats); err != nil {
+		if err := s.refreshDirectory(ctx, st, user, dirPath, &stats); err != nil {
 			return stats, err
 		}
 	}
 	stats.Changed = int64(len(changed))
 
 	stats.Duration = time.Since(start)
-	s.log.Info("quick scan complete",
-		"user", user.Username, "directories_checked", stats.Dirs,
-		"directories_changed", stats.Changed, "duration", stats.Duration)
+	if stats.Changed > 0 {
+		s.log.Info("quick scan complete",
+			"user", user.Username, "directories_checked", stats.Dirs,
+			"directories_changed", stats.Changed, "duration", stats.Duration)
+	} else {
+		s.log.Debug("quick scan complete, nothing changed",
+			"user", user.Username, "directories_checked", stats.Dirs,
+			"duration", stats.Duration)
+	}
 	return stats, nil
 }
 
-// findChangedDirs walks the tree comparing directory timestamps, returning the
-// paths whose contents may have changed.
+// refreshDirectory re-reads one directory's own entries, without descending
+// into subdirectories that already exist.
 //
-// A directory absent from the index is new, and one whose timestamp has moved
-// had something added, removed or renamed in it. Neither requires reading a
-// single file.
-func (s *Scanner) findChangedDirs(ctx context.Context, st *fsx.Storage, user store.User,
-	indexed map[string]store.DirState, stats *Stats) ([]string, error) {
-
-	var changed []string
-	seen := make(map[string]bool, len(indexed))
-
-	var walk func(dirPath string) error
-	walk = func(dirPath string) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		seen[dirPath] = true
-		stats.Dirs++
-
-		info, err := st.Stat(dirPath)
-		if err != nil {
-			// Gone, or unreadable. Either way its parent's timestamp moved, so
-			// the parent is already queued and will settle it.
-			return nil //nolint:nilerr // deliberate
-		}
-
-		prev, known := indexed[dirPath]
-		if !known || prev.Changed(info.ModTime()) {
-			changed = append(changed, dirPath)
-		}
-
-		// Subdirectories are visited regardless: a change further down does not
-		// touch this directory's timestamp.
-		entries, _, err := st.ReadDirReportingSkips(dirPath)
-		if err != nil {
-			return nil //nolint:nilerr // unreadable, as above
-		}
-		for _, e := range entries {
-			if e.IsDir() {
-				if err := walk(fsx.Join(dirPath, e.Name())); err != nil {
-					return err
-				}
-			}
-		}
-		return nil
-	}
-
-	if err := walk(fsx.RootPath); err != nil {
-		return nil, err
-	}
-
-	// A directory in the index that no longer exists on disk. Its parent's
-	// timestamp moved when it went, so the parent is already in the list and
-	// will prune it - but a parent that was itself skipped as unchanged, which
-	// some filesystems allow, would leave it stranded.
-	for dirPath := range indexed {
-		if !seen[dirPath] {
-			parent := path.Dir(dirPath)
-			if parent == "" || parent == "/" {
-				parent = fsx.RootPath
-			}
-			changed = append(changed, parent)
-		}
-	}
-	return dedupe(changed), nil
-}
-
-// rescanOneDirectory re-reads a single directory and propagates the result
-// upwards, leaving the rest of the tree alone.
-func (s *Scanner) rescanOneDirectory(ctx context.Context, st *fsx.Storage, user store.User,
-	dirPath string, _ *Stats) error {
+// Existing subdirectories look after themselves: each has its own timestamp and
+// is checked in its own right by the pass above. Only a subdirectory the index
+// has never seen is scanned in full, since nothing else will find what is
+// inside it.
+func (s *Scanner) refreshDirectory(ctx context.Context, st *fsx.Storage, user store.User,
+	dirPath string, stats *Stats) error {
 
 	info, err := st.Stat(dirPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			// The directory went away; removing it also removes its subtree.
 			return s.updater.Removed(ctx, user, dirPath)
 		}
-		return nil //nolint:nilerr // unreadable right now; the full scan will settle it
+		return nil //nolint:nilerr // unreadable now; the full rescan settles it
 	}
-	if !info.IsDir() {
-		return nil
+
+	node, err := store.NodeByPath(ctx, s.db, user.ID, dirPath)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			// Not indexed at all, so there is no picture to refresh; scan it.
+			return s.ScanPath(ctx, user, dirPath)
+		}
+		return err
 	}
-	// ScanPath re-reads this directory and everything under it, then refreshes
-	// the ETags above it. For a directory whose contents changed that is
-	// exactly the work needed, and it is bounded by the subtree rather than
-	// the share.
-	return s.ScanPath(ctx, user, dirPath)
+
+	entries, _, err := st.ReadDirReportingSkips(dirPath)
+	if err != nil {
+		return nil //nolint:nilerr // as above
+	}
+
+	existing, err := store.ChildNodes(ctx, s.db, node.ID)
+	if err != nil {
+		return err
+	}
+	known := make(map[string]store.Node, len(existing))
+	for _, c := range existing {
+		known[c.Name] = c
+	}
+
+	stamp := store.Stamp()
+	digests := make([]ChildDigest, 0, len(entries))
+	pending := make([]store.Node, 0, len(entries))
+	unchanged := make([]int64, 0, len(entries))
+	newSubdirs := make([]string, 0, 4)
+	seen := make(map[string]bool, len(entries))
+	var total int64
+
+	for _, entry := range entries {
+		name := entry.Name()
+		childPath := fsx.Join(dirPath, name)
+		seen[name] = true
+
+		if entry.IsDir() {
+			prev, ok := known[name]
+			if !ok {
+				// Never seen before, so nothing else will look inside it.
+				newSubdirs = append(newSubdirs, childPath)
+				continue
+			}
+			digests = append(digests, ChildDigest{Name: name, ETag: prev.ETag})
+			total += prev.Size
+			continue
+		}
+
+		childInfo, err := entry.Info()
+		if err != nil {
+			seen[name] = false
+			continue
+		}
+		etag := FileETag(childInfo.Size(), childInfo.ModTime())
+		if _, ok := known[name]; !ok {
+			// A name that is new here may be a file that moved. Detected before
+			// the entries that vanished are deleted below, since the match is
+			// against the index entry at the old path - and losing the file's
+			// ID would make every client delete and re-download it.
+			if moved, err := s.detectRename(ctx, st, user, childPath, childInfo); err != nil {
+				return err
+			} else if moved {
+				stats.Moved++
+			}
+		}
+		if prev, ok := known[name]; ok && !prev.IsDir && prev.ETag == etag {
+			unchanged = append(unchanged, prev.ID)
+			digests = append(digests, ChildDigest{Name: name, ETag: prev.ETag})
+			total += prev.Size
+			stats.Unchanged++
+			continue
+		}
+		pending = append(pending, store.Node{
+			UserID: user.ID, ParentID: node.ID, Path: childPath, Name: name,
+			Size: childInfo.Size(), MTime: childInfo.ModTime(), ETag: etag,
+			ContentType: contentType(name),
+			Dev:         devOf(childInfo), Inode: inodeOf(childInfo),
+		})
+		digests = append(digests, ChildDigest{Name: name, ETag: etag})
+		total += childInfo.Size()
+		stats.Files++
+	}
+
+	// Anything indexed here and no longer on disk. Removed before the new
+	// subdirectories are scanned, so a rename of a directory does not briefly
+	// have both names present.
+	var removed []string
+	for name, c := range known {
+		if !seen[name] {
+			removed = append(removed, c.Path)
+		}
+	}
+
+	unlock := indexLocks.lock(user.ID)
+	err = s.db.Tx(ctx, func(tx *sql.Tx) error {
+		for _, p := range removed {
+			if err := store.DeleteNode(ctx, tx, user.ID, p); err != nil {
+				return err
+			}
+		}
+		for _, n := range pending {
+			if _, err := store.UpsertNode(ctx, tx, n, stamp); err != nil {
+				return err
+			}
+		}
+		return store.TouchNodes(ctx, tx, unchanged, stamp)
+	})
+	unlock()
+	if err != nil {
+		return fmt.Errorf("refresh %s: %w", dirPath, err)
+	}
+	stats.Removed += int64(len(removed))
+
+	// New subdirectories are scanned in full, which also settles their ETags.
+	for _, sub := range newSubdirs {
+		if err := s.ScanPath(ctx, user, sub); err != nil {
+			return err
+		}
+		child, err := store.NodeByPath(ctx, s.db, user.ID, sub)
+		if err != nil {
+			return err
+		}
+		digests = append(digests, ChildDigest{Name: path.Base(sub), ETag: child.ETag})
+		total += child.Size
+		stats.Dirs++
+	}
+
+	unlock = indexLocks.lock(user.ID)
+	defer unlock()
+	if err := store.FinalizeDirNode(ctx, s.db, node.ID, DirETag(digests), total,
+		info.ModTime(), stamp); err != nil {
+		return err
+	}
+	// The change has to reach the root, or a client that skips a directory
+	// whose ETag it already knows never looks inside this one.
+	return propagate(ctx, s.db, user.ID, parentOfPath(dirPath))
+}
+
+func parentOfPath(p string) string {
+	if fsx.IsRoot(p) {
+		return fsx.RootPath
+	}
+	parent := path.Dir(p)
+	if parent == "" || parent == "/" {
+		return fsx.RootPath
+	}
+	return parent
 }
 
 func depth(p string) int {
 	if fsx.IsRoot(p) {
 		return 0
 	}
-	n := 1
-	for i := range len(p) {
-		if p[i] == '/' {
-			n++
-		}
-	}
-	return n
+	return 1 + strings.Count(p, "/")
 }
 
 func dedupe(paths []string) []string {
