@@ -382,3 +382,32 @@ func MoveNode(ctx context.Context, q Querier, userID int64, oldPath, newPath str
 		newPath, len(oldPath)+1, userID, lo, hi)
 	return err
 }
+
+// touchChunk bounds how many ids go into one statement, since SQLite limits
+// how many parameters a query may bind.
+const touchChunk = 400
+
+// TouchNodes moves entries forward to the current scan generation without
+// rewriting them.
+//
+// A rescan of an unchanged tree would otherwise rewrite every row in the
+// database to store values identical to the ones already there. All those rows
+// need is to not look stale to the end-of-scan sweep.
+func TouchNodes(ctx context.Context, q Querier, ids []int64, stamp int64) error {
+	for start := 0; start < len(ids); start += touchChunk {
+		end := min(start+touchChunk, len(ids))
+		batch := ids[start:end]
+
+		args := make([]any, 0, len(batch)+1)
+		args = append(args, stamp)
+		for _, id := range batch {
+			args = append(args, id)
+		}
+		query := `UPDATE nodes SET scanned_at = ? WHERE id IN (?` +
+			strings.Repeat(", ?", len(batch)-1) + `)`
+		if _, err := q.ExecContext(ctx, query, args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}

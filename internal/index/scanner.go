@@ -50,8 +50,11 @@ type Stats struct {
 	SkippedLinks int64
 	// Resumed counts directories skipped because an interrupted scan had
 	// already finished reading them under the same generation.
-	Resumed  int64
-	Duration time.Duration
+	Resumed int64
+	// Unchanged counts files whose metadata matched the index, and which were
+	// therefore marked as seen rather than rewritten.
+	Unchanged int64
+	Duration  time.Duration
 }
 
 // ScanUser walks a user's home directory and brings their index up to date.
@@ -128,7 +131,7 @@ func (s *Scanner) ScanUser(ctx context.Context, user store.User) (Stats, error) 
 		"user", user.Username, "files", stats.Files, "dirs", stats.Dirs,
 		"bytes", stats.Bytes, "moved", stats.Moved, "removed", stats.Removed,
 		"skipped", stats.Skipped, "skipped_links", stats.SkippedLinks,
-		"resumed", stats.Resumed, "duration", stats.Duration)
+		"resumed", stats.Resumed, "unchanged", stats.Unchanged, "duration", stats.Duration)
 	return stats, nil
 }
 
@@ -226,9 +229,9 @@ func (s *Scanner) scanDir(ctx context.Context, st *fsx.Storage, user store.User,
 	if err != nil {
 		return "", 0, fmt.Errorf("read indexed children of %s: %w", dirPath, err)
 	}
-	known := make(map[string]bool, len(existing))
+	known := make(map[string]store.Node, len(existing))
 	for _, c := range existing {
-		known[c.Name] = true
+		known[c.Name] = c
 	}
 
 	digests := make([]ChildDigest, 0, len(entries))
@@ -243,6 +246,10 @@ func (s *Scanner) scanDir(ctx context.Context, st *fsx.Storage, user store.User,
 		etag string
 	}
 	pending := make([]pendingFile, 0, len(entries))
+	// Files whose metadata is unchanged since the last scan. They need no
+	// rewrite, only their generation mark moved forward so the end-of-scan
+	// sweep does not take them for deleted.
+	unchanged := make([]int64, 0, len(entries))
 
 	for _, entry := range entries {
 		childName := entry.Name()
@@ -274,8 +281,29 @@ func (s *Scanner) scanDir(ctx context.Context, st *fsx.Storage, user store.User,
 			continue
 		}
 
+		childETag := FileETag(childInfo.Size(), childInfo.ModTime())
+
+		// An entry whose recomputed ETag matches the stored one is unchanged,
+		// so rewriting the row would store the values already there - and on a
+		// rescan of an unchanged tree that is every row in the database.
+		//
+		// The comparison is against the ETag rather than against size and
+		// modification time directly. The stored timestamp is only accurate to
+		// the second, while the ETag is derived at nanosecond precision, so
+		// comparing timestamps would miss a file rewritten twice within one
+		// second at the same length. The ETag is computed here regardless.
+		if prev, ok := known[childName]; ok && !prev.IsDir && prev.ETag == childETag {
+			unchanged = append(unchanged, prev.ID)
+			digests = append(digests, ChildDigest{Name: childName, ETag: prev.ETag})
+			total += childInfo.Size()
+			stats.Files++
+			stats.Bytes += childInfo.Size()
+			stats.Unchanged++
+			continue
+		}
+
 		// Only a name that is new here can be a file that moved.
-		if detectRenames && !known[childName] {
+		if _, seen := known[childName]; detectRenames && !seen {
 			if moved, err := s.detectRename(ctx, st, user, childPath, childInfo); err != nil {
 				return "", 0, err
 			} else if moved {
@@ -283,7 +311,6 @@ func (s *Scanner) scanDir(ctx context.Context, st *fsx.Storage, user store.User,
 			}
 		}
 
-		childETag := FileETag(childInfo.Size(), childInfo.ModTime())
 		pending = append(pending, pendingFile{
 			node: store.Node{
 				UserID:      user.ID,
@@ -310,14 +337,16 @@ func (s *Scanner) scanDir(ctx context.Context, st *fsx.Storage, user store.User,
 	// One transaction for the whole directory. Committing per file makes the
 	// database the dominant cost of a scan; a directory at a time is a large
 	// enough batch to amortise that without holding the write lock for long.
-	if len(pending) > 0 {
+	if len(pending) > 0 || len(unchanged) > 0 {
 		err := s.db.Tx(ctx, func(tx *sql.Tx) error {
 			for _, pf := range pending {
 				if _, err := store.UpsertNode(ctx, tx, pf.node, stamp); err != nil {
 					return fmt.Errorf("index file %s: %w", pf.node.Path, err)
 				}
 			}
-			return nil
+			// Everything untouched moves forward in one statement rather than
+			// one per file, which is what makes an unchanged rescan cheap.
+			return store.TouchNodes(ctx, tx, unchanged, stamp)
 		})
 		if err != nil {
 			return "", 0, err

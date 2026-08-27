@@ -573,3 +573,61 @@ func TestResumeDoesNotSweepUnvisitedEntries(t *testing.T) {
 		t.Fatalf("a resumed scan swept an entry inside a completed subtree: %v", err)
 	}
 }
+
+// TestRescanSkipsUnchangedFilesButNoticesChanges is the correctness half of the
+// rescan optimisation. Skipping unchanged files is only safe if a changed one
+// is still noticed, and a miss here means a file that never syncs.
+func TestRescanSkipsUnchangedFilesButNoticesChanges(t *testing.T) {
+	f := newFixture(t)
+	f.scan(t)
+	before := f.node(t, "docs/report.txt").ETag
+	rootBefore := f.node(t, ".").ETag
+
+	// Nothing changed: every file should be recognised as such.
+	stats := f.scan(t)
+	if stats.Unchanged != 3 {
+		t.Errorf("Unchanged = %d, want 3 (all files)", stats.Unchanged)
+	}
+	if f.node(t, ".").ETag != rootBefore {
+		t.Error("an unchanged rescan altered the root ETag")
+	}
+
+	mustWrite(t, filepath.Join(f.home, "docs", "report.txt"), "edited, and a different length")
+	stats = f.scan(t)
+	if stats.Unchanged != 2 {
+		t.Errorf("Unchanged = %d, want 2: the edited file must not be skipped", stats.Unchanged)
+	}
+	if f.node(t, "docs/report.txt").ETag == before {
+		t.Error("the edited file kept its old ETag")
+	}
+	if f.node(t, ".").ETag == rootBefore {
+		t.Error("the edit did not reach the root ETag")
+	}
+}
+
+// TestRescanNoticesSameLengthEdit covers the case that made the comparison use
+// ETags rather than timestamps: a file rewritten to the same length. The stored
+// timestamp is only accurate to the second, so a rewrite inside one second
+// would be invisible to a timestamp comparison.
+func TestRescanNoticesSameLengthEdit(t *testing.T) {
+	f := newFixture(t)
+	f.scan(t)
+	before := f.node(t, "top.txt")
+
+	// Same length, and a modification time deliberately inside the same second
+	// as the original.
+	mustWrite(t, filepath.Join(f.home, "top.txt"), "TOP LEVEL")
+	if err := os.Chtimes(filepath.Join(f.home, "top.txt"),
+		before.MTime, before.MTime.Add(400*time.Millisecond)); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	f.scan(t)
+	after := f.node(t, "top.txt")
+	if after.ETag == before.ETag {
+		t.Error("a same-length rewrite within one second was not noticed")
+	}
+	if after.ID != before.ID {
+		t.Error("noticing the edit changed the file's ID")
+	}
+}
