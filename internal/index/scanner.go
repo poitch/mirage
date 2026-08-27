@@ -72,16 +72,19 @@ func (s *Scanner) ScanUser(ctx context.Context, user store.User) (Stats, error) 
 	// every client every interval for nothing.
 	before := s.rootETag(ctx, user.ID)
 
-	progress := s.newProgress(user.Username)
+	progress := s.newProgress(ctx, user.Username)
 	if _, _, err := s.scanDir(ctx, st, user, fsx.RootPath, 0, stamp, &stats, progress); err != nil {
+		progress.finish(ctx, &stats, err)
 		return stats, err
 	}
-	progress.flush(ctx, &stats, "", true)
 
 	removed, err := store.SweepUnscanned(ctx, s.db, user.ID, stamp)
 	if err != nil {
-		return stats, fmt.Errorf("prune index for %s: %w", user.Username, err)
+		err = fmt.Errorf("prune index for %s: %w", user.Username, err)
+		progress.finish(ctx, &stats, err)
+		return stats, err
 	}
+	progress.finish(ctx, &stats, nil)
 	stats.Removed = removed
 
 	if after := s.rootETag(ctx, user.ID); after != before && s.notifier != nil {

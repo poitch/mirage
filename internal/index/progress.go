@@ -21,31 +21,43 @@ const progressKey = "scan_progress"
 // large tree touches hundreds of thousands of files, so this cannot be per file.
 const progressInterval = 5 * time.Second
 
-// staleAfter is how long without an update before a scan is reported as
-// interrupted rather than running.
+// Scan states. A scan records what happened to it rather than leaving it to be
+// inferred from how long ago it last spoke.
 //
-// Generous on purpose. Progress is throttled to progressInterval, but the
-// throttle only fires when the scan reaches a point that reports, and a single
-// directory holding tens of thousands of files - a photo library's derivatives,
-// say - takes a while to work through on spinning disks. Too tight a threshold
-// declares a healthy scan dead, which is worse than noticing a real stall a
-// minute late.
-const staleAfter = 90 * time.Second
+// Inferring it from a timestamp cannot be made reliable: the gap between
+// updates depends on what the scan is walking through, so any threshold is
+// either short enough to libel a healthy scan working through a huge directory,
+// or long enough to be useless. A process that dies cannot record its own
+// death, but the next process to start can observe that a scan was still marked
+// running when nothing was running, which is exact rather than probabilistic.
+const (
+	StateRunning     = "running"
+	StateDone        = "done"
+	StateFailed      = "failed"
+	StateInterrupted = "interrupted"
+)
 
-// Progress is a point-in-time view of a running or finished scan.
+// Progress is a point-in-time view of a scan.
 type Progress struct {
 	User      string    `json:"user"`
+	State     string    `json:"state"`
 	Files     int64     `json:"files"`
 	Dirs      int64     `json:"dirs"`
 	Bytes     int64     `json:"bytes"`
 	Current   string    `json:"current"`
+	Error     string    `json:"error,omitempty"`
 	StartedAt time.Time `json:"started_at"`
 	UpdatedAt time.Time `json:"updated_at"`
-	Done      bool      `json:"done"`
 }
+
+// Running reports whether a scan is in progress.
+func (p Progress) Running() bool { return p.State == StateRunning }
 
 // Elapsed returns how long the scan has been running, or took.
 func (p Progress) Elapsed() time.Duration {
+	if p.Running() {
+		return time.Since(p.StartedAt)
+	}
 	end := p.UpdatedAt
 	if end.Before(p.StartedAt) {
 		end = time.Now()
@@ -60,12 +72,6 @@ func (p Progress) Rate() float64 {
 		return 0
 	}
 	return float64(p.Files+p.Dirs) / seconds
-}
-
-// Stale reports whether the record looks abandoned rather than live, which is
-// what a scan interrupted by a restart leaves behind.
-func (p Progress) Stale() bool {
-	return !p.Done && time.Since(p.UpdatedAt) > staleAfter
 }
 
 // ScanProgress returns the most recent scan progress, if any has been recorded.
@@ -88,12 +94,52 @@ type progressReporter struct {
 	lastAt  time.Time
 }
 
-func (s *Scanner) newProgress(username string) *progressReporter {
+func (s *Scanner) newProgress(ctx context.Context, username string) *progressReporter {
 	now := time.Now()
-	return &progressReporter{
+	r := &progressReporter{
 		scanner: s,
-		current: Progress{User: username, StartedAt: now, UpdatedAt: now},
+		current: Progress{User: username, State: StateRunning, StartedAt: now, UpdatedAt: now},
 	}
+	// Written immediately, so that a process dying at any point from here on
+	// leaves a record saying a scan was running.
+	r.write(ctx)
+	return r
+}
+
+// finish records how the scan ended.
+func (r *progressReporter) finish(ctx context.Context, stats *Stats, err error) {
+	r.current.Files, r.current.Dirs, r.current.Bytes = stats.Files, stats.Dirs, stats.Bytes
+	r.current.Current = ""
+	r.current.UpdatedAt = time.Now()
+	if err != nil {
+		r.current.State = StateFailed
+		r.current.Error = err.Error()
+	} else {
+		r.current.State = StateDone
+	}
+	r.write(ctx)
+}
+
+// ReconcileInterrupted marks a scan that was still recorded as running when the
+// process stopped.
+//
+// Called once at startup, before any scan begins. Nothing can be scanning at
+// that moment, so a record still saying "running" was left by a process that
+// died - which is the one thing a dead process could not write for itself.
+func ReconcileInterrupted(ctx context.Context, db *store.DB) (Progress, bool, error) {
+	p, ok, err := ScanProgress(ctx, db)
+	if err != nil || !ok || !p.Running() {
+		return Progress{}, false, err
+	}
+	p.State = StateInterrupted
+	encoded, err := json.Marshal(p)
+	if err != nil {
+		return Progress{}, false, err
+	}
+	if err := db.SetSetting(ctx, progressKey, string(encoded)); err != nil {
+		return Progress{}, false, err
+	}
+	return p, true, nil
 }
 
 // update records progress, writing at most once per interval.
@@ -101,29 +147,19 @@ func (r *progressReporter) update(ctx context.Context, stats *Stats, currentPath
 	if time.Since(r.lastAt) < progressInterval {
 		return
 	}
-	r.flush(ctx, stats, currentPath, false)
+	r.flush(ctx, stats, currentPath)
 }
 
 // flush writes progress unconditionally.
-func (r *progressReporter) flush(ctx context.Context, stats *Stats, currentPath string, done bool) {
+func (r *progressReporter) flush(ctx context.Context, stats *Stats, currentPath string) {
 	r.lastAt = time.Now()
 	r.current.Files = stats.Files
 	r.current.Dirs = stats.Dirs
 	r.current.Bytes = stats.Bytes
 	r.current.Current = currentPath
 	r.current.UpdatedAt = r.lastAt
-	r.current.Done = done
+	r.write(ctx)
 
-	encoded, err := json.Marshal(r.current)
-	if err != nil {
-		return
-	}
-	if err := r.scanner.db.SetSetting(ctx, progressKey, string(encoded)); err != nil {
-		r.scanner.log.Debug("could not record scan progress", "error", err)
-	}
-	if done {
-		return
-	}
 	// Also logged, because `docker compose logs -f` is what an operator
 	// actually has open while wondering whether anything is happening.
 	r.scanner.log.Info("scanning",
@@ -131,4 +167,14 @@ func (r *progressReporter) flush(ctx context.Context, stats *Stats, currentPath 
 		"bytes", stats.Bytes, "at", currentPath,
 		"rate", fmt.Sprintf("%.0f/s", r.current.Rate()),
 		"elapsed", r.current.Elapsed().Round(time.Second))
+}
+
+func (r *progressReporter) write(ctx context.Context) {
+	encoded, err := json.Marshal(r.current)
+	if err != nil {
+		return
+	}
+	if err := r.scanner.db.SetSetting(ctx, progressKey, string(encoded)); err != nil {
+		r.scanner.log.Debug("could not record scan progress", "error", err)
+	}
 }

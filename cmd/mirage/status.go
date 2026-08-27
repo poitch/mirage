@@ -57,29 +57,38 @@ func printStatus(ctx context.Context, db *store.DB) (done bool, err error) {
 		return true, nil
 	}
 
-	switch {
-	case p.Done:
-		fmt.Printf("Scan of %s finished.\n", p.User)
+	switch p.State {
+	case index.StateDone:
+		fmt.Printf("Scan of %s finished %s ago.\n", p.User,
+			time.Since(p.UpdatedAt).Round(time.Second))
 		fmt.Printf("  %d files, %d directories, %s\n", p.Files, p.Dirs, formatBytes(p.Bytes))
 		fmt.Printf("  took %s\n", p.Elapsed().Round(time.Second))
 		return true, nil
 
-	case p.Stale():
-		// Progress stops being written the moment the process does, so an old
-		// timestamp on an unfinished scan means it was interrupted - almost
-		// always by a restart, which begins the walk again.
-		fmt.Printf("A scan of %s was interrupted, %s ago.\n", p.User,
-			time.Since(p.UpdatedAt).Round(time.Second))
+	case index.StateFailed:
+		fmt.Printf("Scan of %s failed after %s.\n", p.User, p.Elapsed().Round(time.Second))
 		fmt.Printf("  reached %d files, %d directories, %s\n", p.Files, p.Dirs, formatBytes(p.Bytes))
-		fmt.Printf("  last at %s\n", p.Current)
-		fmt.Println("  Restarting the server begins the walk again; indexed entries are kept.")
+		fmt.Printf("  error: %s\n", p.Error)
 		return true, nil
 
-	default:
+	case index.StateInterrupted:
+		// Recorded, not inferred: the scan was still marked running when the
+		// server next started, and nothing can be scanning at that moment.
+		fmt.Printf("A scan of %s was interrupted before it finished.\n", p.User)
+		fmt.Printf("  reached %d files, %d directories, %s\n", p.Files, p.Dirs, formatBytes(p.Bytes))
+		fmt.Printf("  last at %s\n", p.Current)
+		fmt.Println("  Restarting begins the walk again; entries already indexed are kept.")
+		return true, nil
+
+	case index.StateRunning:
 		fmt.Printf("Scanning %s...\n", p.User)
 		fmt.Printf("  %d files, %d directories, %s so far\n", p.Files, p.Dirs, formatBytes(p.Bytes))
 		fmt.Printf("  currently at %s\n", p.Current)
 		fmt.Printf("  %.0f entries/s, running for %s\n", p.Rate(), p.Elapsed().Round(time.Second))
 		return false, nil
+
+	default:
+		fmt.Printf("Scan of %s is in an unrecognised state %q.\n", p.User, p.State)
+		return true, nil
 	}
 }

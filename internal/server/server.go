@@ -265,6 +265,18 @@ func (s *Server) Run(ctx context.Context) error {
 // Until the filesystem watcher lands, this interval is the only thing that
 // surfaces a file dropped in over SMB, so it is also the sync latency.
 func (s *Server) rescan(ctx context.Context) {
+	// Before anything can be scanning, settle what happened to the last one. A
+	// record still saying "running" was left by a process that stopped without
+	// being able to say so - which is exactly the case a timeout heuristic
+	// cannot distinguish from a scan that is simply busy.
+	if p, was, err := index.ReconcileInterrupted(ctx, s.db); err != nil {
+		s.log.Warn("could not reconcile the previous scan", "error", err)
+	} else if was {
+		s.log.Warn("the previous scan did not finish; starting again",
+			"user", p.User, "reached_files", p.Files, "reached_dirs", p.Dirs,
+			"last_at", p.Current)
+	}
+
 	if err := s.scanner.ScanAll(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		s.log.Error("initial scan failed", "error", err)
 	}

@@ -2,30 +2,83 @@ package index
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 )
 
-// TestProgressDistinguishesInterruptedFromRunning matters because the two look
-// identical in the record: an unfinished scan. Progress stops being written the
-// instant the process stops, so a stale timestamp is the only signal that a
-// scan was interrupted rather than still working.
-func TestProgressDistinguishesInterruptedFromRunning(t *testing.T) {
-	now := time.Now()
-	running := Progress{StartedAt: now.Add(-time.Minute), UpdatedAt: now}
-	if running.Stale() {
-		t.Error("a scan updated just now was reported as interrupted")
+// TestInterruptionIsRecordedNotInferred is the property that matters: a scan
+// that stopped is identified by what was written down, not by how long ago it
+// last spoke. A busy scan and a dead one are indistinguishable by timing - the
+// gap between updates depends entirely on what is being walked - so any
+// threshold either libels a healthy scan or misses a dead one.
+func TestInterruptionIsRecordedNotInferred(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+
+	// A scan that has been silent for an hour but is genuinely still running.
+	writeProgress(t, f, Progress{
+		User: "alice", State: StateRunning, Files: 500_000,
+		Current:   "04.Archives/huge",
+		StartedAt: time.Now().Add(-2 * time.Hour),
+		UpdatedAt: time.Now().Add(-time.Hour),
+	})
+	p, _, err := ScanProgress(ctx, f.db)
+	if err != nil {
+		t.Fatalf("ScanProgress: %v", err)
+	}
+	if !p.Running() {
+		t.Error("a long-silent but running scan was not reported as running")
 	}
 
-	interrupted := Progress{StartedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-time.Hour)}
-	if !interrupted.Stale() {
-		t.Error("a scan last updated an hour ago was reported as still running")
+	// Only a restart settles it, because only then is it certain that nothing
+	// is scanning.
+	was, ok, err := ReconcileInterrupted(ctx, f.db)
+	if err != nil {
+		t.Fatalf("ReconcileInterrupted: %v", err)
+	}
+	if !ok {
+		t.Fatal("a scan left marked running was not reconciled")
+	}
+	if was.Files != 500_000 || was.Current != "04.Archives/huge" {
+		t.Errorf("reconciliation lost how far the scan got: %+v", was)
 	}
 
-	// A finished scan is never stale, however long ago it ran.
-	finished := Progress{StartedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-time.Hour), Done: true}
-	if finished.Stale() {
-		t.Error("a completed scan was reported as interrupted")
+	p, _, _ = ScanProgress(ctx, f.db)
+	if p.State != StateInterrupted {
+		t.Errorf("State = %q, want %q", p.State, StateInterrupted)
+	}
+
+	// Reconciling again must not disturb a settled record.
+	if _, ok, _ := ReconcileInterrupted(ctx, f.db); ok {
+		t.Error("an already-reconciled scan was reconciled a second time")
+	}
+}
+
+// TestFinishedScanIsNeverReconciled: a completed scan stays completed no matter
+// how long ago it ran or how many restarts follow.
+func TestFinishedScanIsNeverReconciled(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+
+	writeProgress(t, f, Progress{
+		User: "alice", State: StateDone, Files: 10,
+		StartedAt: time.Now().Add(-72 * time.Hour),
+		UpdatedAt: time.Now().Add(-72 * time.Hour),
+	})
+	if _, ok, err := ReconcileInterrupted(ctx, f.db); err != nil || ok {
+		t.Errorf("a finished scan was reconciled as interrupted (ok=%v, err=%v)", ok, err)
+	}
+}
+
+func writeProgress(t *testing.T, f *fixture, p Progress) {
+	t.Helper()
+	encoded, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := f.db.SetSetting(context.Background(), progressKey, string(encoded)); err != nil {
+		t.Fatalf("SetSetting: %v", err)
 	}
 }
 
@@ -67,8 +120,8 @@ func TestScanRecordsProgress(t *testing.T) {
 	if !ok {
 		t.Fatal("no progress recorded after a scan")
 	}
-	if !p.Done {
-		t.Error("progress does not report the scan as finished")
+	if p.State != StateDone {
+		t.Errorf("State = %q, want %q", p.State, StateDone)
 	}
 	if p.Files != 3 {
 		t.Errorf("Files = %d, want 3", p.Files)
