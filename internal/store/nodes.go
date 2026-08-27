@@ -290,9 +290,9 @@ func EnsureDirNode(ctx context.Context, q Querier, userID, parentID int64, path,
 // children have been scanned, and marks the subtree as fully read.
 func FinalizeDirNode(ctx context.Context, q Querier, id int64, etag string, size int64, mtime time.Time, stamp int64) error {
 	_, err := q.ExecContext(ctx, `
-		UPDATE nodes SET etag = ?, size = ?, mtime = ?, scanned_at = ?, complete = 1
+		UPDATE nodes SET etag = ?, size = ?, mtime = ?, mtime_nsec = ?, scanned_at = ?, complete = 1
 		WHERE id = ?`,
-		etag, size, mtime.Unix(), stamp, id)
+		etag, size, mtime.Unix(), mtime.Nanosecond(), stamp, id)
 	return err
 }
 
@@ -410,4 +410,58 @@ func TouchNodes(ctx context.Context, q Querier, ids []int64, stamp int64) error 
 		}
 	}
 	return nil
+}
+
+// DirState is the little a quick pass needs to know about an indexed directory.
+type DirState struct {
+	ID    int64
+	MTime time.Time
+	ETag  string
+	Size  int64
+	// NsecKnown is false for rows written before sub-second precision was
+	// recorded, where MTime is only accurate to the second.
+	NsecKnown bool
+}
+
+// Changed reports whether an on-disk timestamp differs from the recorded one,
+// at the best precision available for that row.
+func (d DirState) Changed(onDisk time.Time) bool {
+	if d.MTime.Unix() != onDisk.Unix() {
+		return true
+	}
+	if !d.NsecKnown {
+		// Only seconds were recorded, so a change inside this second cannot be
+		// distinguished. Reported as unchanged; the full rescan is the backstop.
+		return false
+	}
+	return d.MTime.Nanosecond() != onDisk.Nanosecond()
+}
+
+// IndexedDirs returns every indexed directory for a user, keyed by path.
+//
+// Fetched in one query so that a quick pass can walk the whole tree comparing
+// timestamps without touching the database again. Asking per directory would
+// put the database back in the inner loop, which is the cost the quick pass
+// exists to avoid.
+func IndexedDirs(ctx context.Context, q Querier, userID int64) (map[string]DirState, error) {
+	rows, err := q.QueryContext(ctx,
+		`SELECT path, id, mtime, mtime_nsec, etag, size FROM nodes WHERE user_id = ? AND is_dir = 1`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string]DirState)
+	for rows.Next() {
+		var path string
+		var d DirState
+		var mtime, nsec int64
+		if err := rows.Scan(&path, &d.ID, &mtime, &nsec, &d.ETag, &d.Size); err != nil {
+			return nil, err
+		}
+		d.MTime = time.Unix(mtime, nsec)
+		d.NsecKnown = nsec != 0
+		out[path] = d
+	}
+	return out, rows.Err()
 }

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -68,7 +69,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 		return fmt.Errorf("list users: %w", err)
 	}
 
-	var watched int
+	var watched, wanted int
 	for _, u := range users {
 		if u.Disabled {
 			continue
@@ -82,16 +83,29 @@ func (w *Watcher) Run(ctx context.Context) error {
 		w.homes[home] = u
 		w.mu.Unlock()
 
-		n, err := w.watchTree(fsw, home)
+		n, seen, err := w.watchTree(fsw, home)
 		watched += n
+		wanted += seen
 		if err != nil {
 			w.reportWatchFailure(u, err)
 		}
 	}
-	if watched == 0 {
+
+	switch {
+	case watched == 0:
 		w.log.Warn("no directories are being watched; changes made outside Mirage " +
 			"will only be seen by the periodic rescan")
-	} else {
+	case watched < wanted:
+		// Partial coverage is the dangerous middle: changes are picked up
+		// promptly in some parts of the tree and not at all in others, which
+		// looks like intermittent failure rather than a limit being hit.
+		w.log.Warn("watching only part of the tree; changes in the rest will wait "+
+			"for the periodic rescan",
+			"watched", watched, "directories", wanted,
+			"limit", inotifyLimit(),
+			"hint", fmt.Sprintf("raise fs.inotify.max_user_watches to at least %d, "+
+				"or exclude costly directories with storage.exclude", wanted+wanted/10))
+	default:
 		w.log.Info("watching for changes", "directories", watched, "users", len(w.homes))
 	}
 
@@ -103,11 +117,10 @@ func (w *Watcher) Run(ctx context.Context) error {
 //
 // inotify does not recurse, so each directory needs its own watch. Failures are
 // collected rather than fatal: watching most of a tree is better than none.
-func (w *Watcher) watchTree(fsw *fsnotify.Watcher, dir string) (int, error) {
-	var added int
+func (w *Watcher) watchTree(fsw *fsnotify.Watcher, dir string) (added, seen int, err error) {
 	var firstErr error
 
-	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+	walkErr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// An unreadable subdirectory is skipped, exactly as the scanner
 			// skips it, rather than aborting the walk.
@@ -119,6 +132,7 @@ func (w *Watcher) watchTree(fsw *fsnotify.Watcher, dir string) (int, error) {
 		if fsx.IsInternal(d.Name()) {
 			return filepath.SkipDir
 		}
+		seen++
 		if err := fsw.Add(path); err != nil {
 			if firstErr == nil {
 				firstErr = err
@@ -128,10 +142,25 @@ func (w *Watcher) watchTree(fsw *fsnotify.Watcher, dir string) (int, error) {
 		added++
 		return nil
 	})
-	if err != nil && firstErr == nil {
-		firstErr = err
+	if walkErr != nil && firstErr == nil {
+		firstErr = walkErr
 	}
-	return added, firstErr
+	return added, seen, firstErr
+}
+
+// inotifyLimit reports the kernel's per-user watch limit, or 0 where it cannot
+// be read. Quoting it back turns "no space left on device" into a number the
+// operator can compare against their tree.
+func inotifyLimit() int {
+	raw, err := os.ReadFile("/proc/sys/fs/inotify/max_user_watches")
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // reportWatchFailure explains a failed watch in terms an operator can act on.
@@ -184,7 +213,7 @@ func (w *Watcher) consume(ctx context.Context, fsw *fsnotify.Watcher) error {
 			// files that arrived before the watch was added.
 			if event.Has(fsnotify.Create) {
 				if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
-					if _, err := w.watchTree(fsw, event.Name); err != nil {
+					if _, _, err := w.watchTree(fsw, event.Name); err != nil {
 						w.log.Debug("could not watch new directory", "path", event.Name, "error", err)
 					}
 				}

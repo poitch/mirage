@@ -294,6 +294,8 @@ func (s *Server) rescan(ctx context.Context) {
 	// interval, that means scanning without pause forever - the disks never go
 	// quiet and nothing ever says why. Resetting after the scan makes the
 	// interval mean what it reads like: the gap between scans.
+	go s.quickRescan(ctx)
+
 	interval := s.cfg.Storage.RescanInterval.Duration()
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
@@ -311,11 +313,47 @@ func (s *Server) rescan(ctx context.Context) {
 				// Worth saying plainly: the setting cannot do what it says, and
 				// the operator is the only one who can decide what to do about
 				// it - raise the interval, or exclude what is expensive.
-				s.log.Warn("a rescan takes longer than the interval between them; "+
+				s.log.Warn("a full rescan takes longer than the interval between them; "+
 					"the next begins after the configured gap regardless",
 					"took", taken.Round(time.Second), "interval", interval,
 					"hint", "raise storage.rescan_interval, or exclude directories "+
 						"that are costly to index with storage.exclude")
+			}
+			timer.Reset(interval)
+		}
+	}
+}
+
+// quickRescan runs the cheap pass that finds files added, removed or renamed.
+//
+// This is the one that decides how long a file dropped over SMB takes to reach
+// a client on a share too large to watch every directory of. It reads directory
+// timestamps rather than stat'ing every file, so it can run often enough to
+// matter without keeping the disks busy.
+func (s *Server) quickRescan(ctx context.Context) {
+	interval := s.cfg.Storage.QuickRescanInterval.Duration()
+	if interval <= 0 {
+		s.log.Info("quick rescan disabled; changes made outside Mirage wait for " +
+			"the filesystem watcher or the full rescan")
+		return
+	}
+
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			started := time.Now()
+			if err := s.scanner.QuickScanAll(ctx, "quick rescan"); err != nil && !errors.Is(err, context.Canceled) {
+				s.log.Error("quick rescan failed", "error", err)
+			}
+			if taken := time.Since(started); taken > interval {
+				s.log.Warn("a quick rescan takes longer than the interval between them",
+					"took", taken.Round(time.Second), "interval", interval,
+					"hint", "raise storage.quick_rescan_interval, or exclude "+
+						"directories with storage.exclude")
 			}
 			timer.Reset(interval)
 		}

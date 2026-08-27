@@ -70,6 +70,14 @@ type Storage struct {
 	// Watcher enables the fsnotify watcher. Disabling it leaves reconciliation
 	// entirely to RescanInterval, which is slower but still correct.
 	Watcher bool `yaml:"watcher"`
+	// QuickRescanInterval is the gap between quick passes, which use directory
+	// timestamps to find files added, removed or renamed without stat'ing every
+	// file in the share.
+	//
+	// This is what keeps a file dropped over SMB appearing on clients in
+	// minutes on a share too large to walk in full at that frequency, and too
+	// large for the kernel to watch every directory of. Zero disables it.
+	QuickRescanInterval Duration `yaml:"quick_rescan_interval"`
 	// Exclude lists entry names that are not indexed or synced, matched against
 	// the name at any depth using filepath.Match syntax.
 	//
@@ -111,10 +119,11 @@ func Default() Config {
 		},
 		Database: Database{Path: "/var/lib/mirage/mirage.db"},
 		Storage: Storage{
-			FileMode:       0o640,
-			DirMode:        0o750,
-			RescanInterval: Duration(15 * time.Minute),
-			Watcher:        true,
+			FileMode:            0o640,
+			DirMode:             0o750,
+			RescanInterval:      Duration(6 * time.Hour),
+			QuickRescanInterval: Duration(5 * time.Minute),
+			Watcher:             true,
 		},
 	}
 }
@@ -171,6 +180,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Storage.RescanInterval < 0 {
 		return fmt.Errorf("storage.rescan_interval must not be negative")
+	}
+	if c.Storage.QuickRescanInterval < 0 {
+		return fmt.Errorf("storage.quick_rescan_interval must not be negative")
 	}
 	// Compiled here so a malformed pattern is a startup error rather than
 	// something that silently matches nothing for the life of the server.

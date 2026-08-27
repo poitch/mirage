@@ -59,8 +59,13 @@ func TestLoadValid(t *testing.T) {
 		t.Errorf("dir_mode = %#o, want 0755", got)
 	}
 	// Unset fields must fall back to defaults rather than zero values.
-	if cfg.Storage.RescanInterval.Duration() != 15*time.Minute {
-		t.Errorf("rescan_interval = %v, want 15m default", cfg.Storage.RescanInterval)
+	if cfg.Storage.RescanInterval.Duration() != 6*time.Hour {
+		t.Errorf("rescan_interval = %v, want 6h default", cfg.Storage.RescanInterval)
+	}
+	// The quick pass is what keeps change latency reasonable on a share too
+	// large to walk often, so it defaults to on.
+	if cfg.Storage.QuickRescanInterval.Duration() != 5*time.Minute {
+		t.Errorf("quick_rescan_interval = %v, want 5m default", cfg.Storage.QuickRescanInterval)
 	}
 	if !cfg.Storage.Watcher {
 		t.Error("watcher should default to true")

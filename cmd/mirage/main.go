@@ -27,7 +27,7 @@ Usage:
 Commands:
   serve      Run the server
   doctor     Check the config and the health of each user's storage
-  scan       Rebuild the file index from disk
+  scan       Rebuild the file index from disk (-quick for a fast pass)
   ls         Show what is indexed for an account, and what is not
   status     Report progress of a running scan
   user       Inspect accounts and manage credentials

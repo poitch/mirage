@@ -27,6 +27,7 @@ type Scanner struct {
 	storage  *fsx.Manager
 	log      *slog.Logger
 	notifier Notifier
+	updater  *Updater
 }
 
 // SetNotifier attaches a change notifier. Passing nil disables notification.
@@ -34,7 +35,7 @@ func (s *Scanner) SetNotifier(n Notifier) { s.notifier = n }
 
 // NewScanner builds a Scanner.
 func NewScanner(db *store.DB, storage *fsx.Manager, log *slog.Logger) *Scanner {
-	return &Scanner{db: db, storage: storage, log: log}
+	return &Scanner{db: db, storage: storage, log: log, updater: NewUpdater(db)}
 }
 
 // Stats summarises one scan.
@@ -54,11 +55,18 @@ type Stats struct {
 	// Unchanged counts files whose metadata matched the index, and which were
 	// therefore marked as seen rather than rewritten.
 	Unchanged int64
-	Duration  time.Duration
+	// Changed counts directories a quick pass found to have moved and therefore
+	// re-read. On a settled share this is zero and the pass does no writes.
+	Changed  int64
+	Duration time.Duration
 }
 
 // ScanUser walks a user's home directory and brings their index up to date.
 func (s *Scanner) ScanUser(ctx context.Context, user store.User) (Stats, error) {
+	return s.scanUser(ctx, user)
+}
+
+func (s *Scanner) scanUser(ctx context.Context, user store.User) (Stats, error) {
 	start := time.Now()
 	var stats Stats
 
@@ -108,7 +116,11 @@ func (s *Scanner) ScanUser(ctx context.Context, user store.User) (Stats, error) 
 	before := s.rootETag(ctx, user.ID)
 
 	progress := s.newProgress(ctx, user.Username, stamp, detectRenames)
-	if _, _, err := s.scanDir(ctx, st, user, fsx.RootPath, 0, stamp, &stats, progress, detectRenames, resuming); err != nil {
+	run := &scanRun{
+		storage: st, user: user, stamp: stamp, stats: &stats, progress: progress,
+		detectRenames: detectRenames, resuming: resuming,
+	}
+	if _, _, err := s.scanDir(ctx, run, fsx.RootPath, 0); err != nil {
 		progress.finish(ctx, &stats, err)
 		return stats, err
 	}
@@ -135,11 +147,28 @@ func (s *Scanner) ScanUser(ctx context.Context, user store.User) (Stats, error) 
 	return stats, nil
 }
 
+// scanRun carries the settings that apply to a whole scan, so they are not
+// threaded through the recursion as a growing list of positional flags.
+type scanRun struct {
+	storage  *fsx.Storage
+	user     store.User
+	stamp    int64
+	stats    *Stats
+	progress *progressReporter
+
+	// detectRenames looks up whether a newly-seen file is one that moved.
+	detectRenames bool
+	// resuming skips subtrees an interrupted scan already finished.
+	resuming bool
+}
+
 // scanDir indexes one directory and everything beneath it, returning the
 // directory's derived ETag and its recursive size.
-func (s *Scanner) scanDir(ctx context.Context, st *fsx.Storage, user store.User,
-	dirPath string, parentID int64, stamp int64, stats *Stats, progress *progressReporter,
-	detectRenames, resuming bool) (etag string, size int64, err error) {
+func (s *Scanner) scanDir(ctx context.Context, run *scanRun,
+	dirPath string, parentID int64) (etag string, size int64, err error) {
+
+	st, user, stamp := run.storage, run.user, run.stamp
+	stats, progress := run.stats, run.progress
 
 	if err := ctx.Err(); err != nil {
 		return "", 0, err
@@ -150,7 +179,7 @@ func (s *Scanner) scanDir(ctx context.Context, st *fsx.Storage, user store.User,
 
 	// A directory already finished under this generation was completed by the
 	// interrupted pass, so the whole subtree beneath it can be skipped.
-	if resuming {
+	if run.resuming {
 		if prev, err := store.NodeByPath(ctx, s.db, user.ID, dirPath); err == nil &&
 			prev.IsDir && prev.Complete && prev.ScannedAt == stamp {
 			// Everything under a skipped subtree is re-stamped as seen. In
@@ -256,7 +285,7 @@ func (s *Scanner) scanDir(ctx context.Context, st *fsx.Storage, user store.User,
 		childPath := fsx.Join(dirPath, childName)
 
 		if entry.IsDir() {
-			childETag, childSize, err := s.scanDir(ctx, st, user, childPath, dirID, stamp, stats, progress, detectRenames, resuming)
+			childETag, childSize, err := s.scanDir(ctx, run, childPath, dirID)
 			if err != nil {
 				return "", 0, err
 			}
@@ -303,7 +332,7 @@ func (s *Scanner) scanDir(ctx context.Context, st *fsx.Storage, user store.User,
 		}
 
 		// Only a name that is new here can be a file that moved.
-		if _, seen := known[childName]; detectRenames && !seen {
+		if _, seen := known[childName]; run.detectRenames && !seen {
 			if moved, err := s.detectRename(ctx, st, user, childPath, childInfo); err != nil {
 				return "", 0, err
 			} else if moved {
@@ -393,7 +422,8 @@ func (s *Scanner) ScanPath(ctx context.Context, user store.User, target string) 
 	stamp := store.Stamp()
 	var stats Stats
 	if info.IsDir() {
-		if _, _, err := s.scanDir(ctx, st, user, target, parentID, stamp, &stats, nil, true, false); err != nil {
+		run := &scanRun{storage: st, user: user, stamp: stamp, stats: &stats, detectRenames: true}
+		if _, _, err := s.scanDir(ctx, run, target, parentID); err != nil {
 			return err
 		}
 		// Scoped sweep: only entries under this subtree, since the rest of the
@@ -512,11 +542,24 @@ func escapeLikePrefix(p string) string {
 // A failure for one user is logged and the rest continue: one bad mount should
 // not leave every other tenant unindexed.
 func (s *Scanner) ScanAll(ctx context.Context, reason string) error {
+	return s.scanAll(ctx, reason, false)
+}
+
+// QuickScanAll runs a quick pass over every enabled account.
+func (s *Scanner) QuickScanAll(ctx context.Context, reason string) error {
+	return s.scanAll(ctx, reason, true)
+}
+
+func (s *Scanner) scanAll(ctx context.Context, reason string, quick bool) error {
 	users, err := s.db.ListUsers(ctx)
 	if err != nil {
 		return fmt.Errorf("list users: %w", err)
 	}
-	s.log.Info("scan starting", "reason", reason, "accounts", len(users))
+	kind := "full"
+	if quick {
+		kind = "quick"
+	}
+	s.log.Info("scan starting", "kind", kind, "reason", reason, "accounts", len(users))
 	for _, u := range users {
 		if u.Disabled {
 			continue
@@ -524,7 +567,11 @@ func (s *Scanner) ScanAll(ctx context.Context, reason string) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if _, err := s.ScanUser(ctx, u); err != nil {
+		scan := s.ScanUser
+		if quick {
+			scan = s.QuickScanUser
+		}
+		if _, err := scan(ctx, u); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return err
 			}

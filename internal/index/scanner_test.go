@@ -665,3 +665,126 @@ func TestScanHonoursExclusions(t *testing.T) {
 		t.Errorf("an excluded sibling hid a real file: %v", err)
 	}
 }
+
+// TestQuickScanFindsNewFiles is the case that decides how long a file dropped
+// over SMB takes to reach a client: a quick pass must notice it.
+func TestQuickScanFindsNewFiles(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	f.scan(t)
+	rootBefore := f.node(t, ".").ETag
+
+	mustWrite(t, filepath.Join(f.home, "docs", "nested", "dropped-over-smb.txt"), "arrived")
+
+	stats, err := f.scanner.QuickScanUser(ctx, f.user)
+	if err != nil {
+		t.Fatalf("QuickScanUser: %v", err)
+	}
+	if _, err := store.NodeByPath(ctx, f.db, f.user.ID, "docs/nested/dropped-over-smb.txt"); err != nil {
+		t.Fatalf("a quick pass missed a new file: %v", err)
+	}
+	// Reaching the index is not enough; a client skips a directory whose ETag
+	// it already knows, so it has to surface at the root.
+	if f.node(t, ".").ETag == rootBefore {
+		t.Error("a quick pass did not propagate the new file to the root ETag")
+	}
+	// The point of the pass: only the directory that moved is re-read, not the
+	// whole tree. Anything else and it would cost the same as a full scan.
+	if stats.Changed != 1 {
+		t.Errorf("Changed = %d, want 1: only the directory that moved should be re-read", stats.Changed)
+	}
+	if stats.Dirs < 3 {
+		t.Errorf("Dirs = %d: the pass should still have checked every directory", stats.Dirs)
+	}
+}
+
+func TestQuickScanFindsDeletionsAndRenames(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	f.scan(t)
+
+	if err := os.Remove(filepath.Join(f.home, "docs", "report.txt")); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if _, err := f.scanner.QuickScanUser(ctx, f.user); err != nil {
+		t.Fatalf("QuickScanUser: %v", err)
+	}
+	if _, err := store.NodeByPath(ctx, f.db, f.user.ID, "docs/report.txt"); err == nil {
+		t.Error("a quick pass missed a deletion")
+	}
+
+	before := f.node(t, "top.txt").ID
+	if err := os.Rename(filepath.Join(f.home, "top.txt"), filepath.Join(f.home, "renamed.txt")); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if _, err := f.scanner.QuickScanUser(ctx, f.user); err != nil {
+		t.Fatalf("QuickScanUser: %v", err)
+	}
+	after, err := store.NodeByPath(ctx, f.db, f.user.ID, "renamed.txt")
+	if err != nil {
+		t.Fatalf("a quick pass missed a rename: %v", err)
+	}
+	if after.ID != before {
+		t.Errorf("the rename lost the file's ID: %d then %d", before, after.ID)
+	}
+}
+
+// TestQuickScanIsSoundWhenNothingChanged: it must not invent changes, or every
+// client would resynchronise on every pass.
+func TestQuickScanIsSoundWhenNothingChanged(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	f.scan(t)
+	before := f.node(t, ".").ETag
+
+	for range 3 {
+		if _, err := f.scanner.QuickScanUser(ctx, f.user); err != nil {
+			t.Fatalf("QuickScanUser: %v", err)
+		}
+	}
+	if got := f.node(t, ".").ETag; got != before {
+		t.Errorf("repeated quick passes changed the root ETag: %q then %q", before, got)
+	}
+	// And nothing was swept away by a pass that deliberately skips directories.
+	for _, p := range []string{"top.txt", "docs/report.txt", "docs/nested/deep.txt"} {
+		if _, err := store.NodeByPath(ctx, f.db, f.user.ID, p); err != nil {
+			t.Errorf("a quick pass removed %q: %v", p, err)
+		}
+	}
+}
+
+// TestQuickScanMissesInPlaceEdits documents the one thing it cannot see, so the
+// limitation is recorded rather than discovered. A file rewritten under the
+// same name does not change its directory's timestamp; the full scan is what
+// catches those.
+func TestQuickScanMissesInPlaceEdits(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	f.scan(t)
+	before := f.node(t, "docs/report.txt").ETag
+
+	// Rewritten, then the directory's timestamp restored to what it was, which
+	// is what an in-place write looks like on a real filesystem.
+	docs := filepath.Join(f.home, "docs")
+	dirInfo, err := os.Stat(docs)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	mustWrite(t, filepath.Join(docs, "report.txt"), "quite different content here")
+	if err := os.Chtimes(docs, dirInfo.ModTime(), dirInfo.ModTime()); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	if _, err := f.scanner.QuickScanUser(ctx, f.user); err != nil {
+		t.Fatalf("QuickScanUser: %v", err)
+	}
+	if f.node(t, "docs/report.txt").ETag != before {
+		t.Skip("this filesystem surfaced the edit anyway; the limitation does not apply here")
+	}
+
+	// The full scan is the backstop, and must catch it.
+	f.scan(t)
+	if f.node(t, "docs/report.txt").ETag == before {
+		t.Error("the full scan also missed an in-place edit")
+	}
+}

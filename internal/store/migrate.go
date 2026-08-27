@@ -147,6 +147,17 @@ CREATE TABLE settings (
 	`
 ALTER TABLE nodes ADD COLUMN complete INTEGER NOT NULL DEFAULT 0;
 `,
+	// 5: sub-second precision for modification times.
+	//
+	// The quick pass decides a directory changed by comparing its recorded
+	// timestamp with the one on disk. At whole-second resolution a change
+	// landing in the same second as the previously recorded one compares equal
+	// and is missed. Rows written before this exist with zero here, which is
+	// read as "unknown" and falls back to comparing seconds - so upgrading does
+	// not make every directory look changed at once.
+	`
+ALTER TABLE nodes ADD COLUMN mtime_nsec INTEGER NOT NULL DEFAULT 0;
+`,
 }
 
 // migrate applies any migrations the database has not yet seen.

@@ -35,6 +35,23 @@ storage:
   # almost continuously for very little benefit. Hours, not minutes, is right
   # for a big share. Zero disables it and leaves everything to the watcher.
   rescan_interval: 6h
+
+  # Gap between quick passes. These read directory timestamps rather than
+  # stat'ing every file, so they find anything added, removed or renamed -
+  # which is what dropping a file over SMB looks like - at a fraction of the
+  # cost of a full walk. They cannot see a file rewritten in place under the
+  # same name; the full rescan above is the backstop for those.
+  #
+  # This is what decides how long a file dropped over SMB takes to appear on
+  # clients, on a share too large for the kernel to watch every directory of.
+  quick_rescan_interval: 5m
+
+  # Watch the filesystem for changes as they happen, which is faster than any
+  # scan. Each directory needs a kernel watch, and the limit is low by default:
+  # a share with hundreds of thousands of directories will exhaust it, and the
+  # startup log says so along with the number to raise it to. On Synology,
+  # `sysctl -w fs.inotify.max_user_watches=1048576`, made permanent as a
+  # boot-up task in DSM's Task Scheduler.
   watcher: true
 
   # Entry names never indexed or synced, matched at any depth. filepath.Match
