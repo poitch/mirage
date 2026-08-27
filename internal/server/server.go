@@ -173,6 +173,12 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /index.php/login/v2/flow/{token}", s.loginFlow.Page)
 	mux.HandleFunc("POST /index.php/login/v2/flow/{token}", s.loginFlow.Page)
 
+	// The pre-v2 pairing flow, which the mobile apps use. It hands credentials
+	// over by redirecting to a scheme the app registered, rather than by having
+	// the app poll for them.
+	mux.HandleFunc("GET "+auth.LegacyFlowPath, s.loginFlow.LegacyPage)
+	mux.HandleFunc("POST "+auth.LegacyFlowPath, s.loginFlow.LegacyPage)
+
 	if s.admin != nil {
 		s.admin.Routes(mux)
 	}

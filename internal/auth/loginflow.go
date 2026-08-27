@@ -7,9 +7,11 @@ import (
 	"embed"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html/template"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -138,6 +140,17 @@ type pageData struct {
 	Action   string
 	Username string
 	Error    string
+	// Handoff is a custom-scheme URL the browser is sent to once access is
+	// granted, which is how a mobile app is handed its credentials. Empty for
+	// the polling flow, where the app collects them itself.
+	//
+	// Typed as template.URL because html/template permits only http, https and
+	// mailto in a URL attribute and rewrites anything else to a placeholder -
+	// which silently turns the handover into a dead link. Declaring it safe is
+	// justified by handoffURL building the whole thing: the account name is
+	// already restricted to a known character set, the credential is generated
+	// alphanumeric, and both are escaped on the way in.
+	Handoff template.URL
 }
 
 // Page serves the browser side of pairing at
@@ -231,8 +244,11 @@ func (lf *LoginFlow) render(w http.ResponseWriter, name string, status int, data
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "no-store")
+	// The handover navigates to a custom scheme, so the policy has to allow it
+	// as a navigation target; everything else stays shut.
 	w.Header().Set("Content-Security-Policy",
-		"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
+		"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; "+
+			"frame-ancestors 'none'; navigate-to 'self' "+handoffScheme+":")
 	w.WriteHeader(status)
 	if err := lf.tmpl.ExecuteTemplate(w, name, data); err != nil {
 		lf.log.Error("could not render page", "template", name, "error", err)
@@ -251,6 +267,90 @@ func (lf *LoginFlow) PrunePairingSessions(ctx context.Context) {
 	if n > 0 {
 		lf.log.Debug("pruned expired pairing sessions", "count", n)
 	}
+}
+
+// LegacyFlowPath is the pre-v2 pairing endpoint.
+//
+// It still matters because it is what the mobile apps use. Where the desktop
+// client polls for its credentials, this flow hands them over by redirecting
+// the browser to a custom scheme the app has registered - which is also what
+// dismisses the in-app browser. Without it the page simply sits there after a
+// successful sign-in, which is exactly what it looks like when it is missing.
+const LegacyFlowPath = "/index.php/login/flow"
+
+// handoffScheme is the URL scheme Nextcloud clients register.
+const handoffScheme = "nc"
+
+// LegacyPage serves the browser side of the pre-v2 pairing flow.
+//
+// There is no poll token here: the app learns nothing until the redirect at the
+// end, so the credential is minted and handed over in one step.
+func (lf *LoginFlow) LegacyPage(w http.ResponseWriter, r *http.Request) {
+	device := describeClient(r.UserAgent())
+	data := pageData{Device: device, Action: LegacyFlowPath}
+
+	if r.Method == http.MethodGet {
+		lf.render(w, "login.html", http.StatusOK, data)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		data.Error = "That request could not be read. Please try again."
+		lf.render(w, "login.html", http.StatusBadRequest, data)
+		return
+	}
+	username := strings.TrimSpace(r.PostFormValue("username"))
+	data.Username = username
+
+	user, err := lf.auth.Verify(r.Context(), username, r.PostFormValue("password"))
+	if err != nil {
+		if !errors.Is(err, ErrUnauthorized) {
+			lf.log.Error("pairing sign-in failed", "error", err)
+			data.Error = "Something went wrong. Please try again."
+			lf.render(w, "login.html", http.StatusInternalServerError, data)
+			return
+		}
+		lf.log.Info("rejected pairing sign-in", "user", username, "device", device, "flow", "legacy")
+		time.Sleep(failedLoginDelay)
+		data.Error = "Wrong username or password."
+		lf.render(w, "login.html", http.StatusUnauthorized, data)
+		return
+	}
+
+	appPassword, err := GenerateAppPassword()
+	if err != nil {
+		lf.log.Error("could not generate app password", "error", err)
+		data.Error = "Something went wrong. Please try again."
+		lf.render(w, "login.html", http.StatusInternalServerError, data)
+		return
+	}
+	if _, err := lf.db.CreateAppPassword(r.Context(), user.ID, device, HashToken(appPassword)); err != nil {
+		lf.log.Error("could not store app password", "user", user.Username, "error", err)
+		data.Error = "Something went wrong. Please try again."
+		lf.render(w, "login.html", http.StatusInternalServerError, data)
+		return
+	}
+
+	lf.log.Info("device authorised", "user", user.Username, "device", device, "flow", "legacy")
+
+	// The redirect is the handover. It is rendered as a page rather than sent
+	// as a 302 so that a browser without the scheme registered shows something
+	// explaining itself instead of a bare "cannot open" error - the app is
+	// dismissed by the scheme either way.
+	lf.render(w, "granted.html", http.StatusOK, pageData{
+		Device:  device,
+		Handoff: template.URL(handoffURL(lf.externalURL, user.Username, appPassword)),
+	})
+}
+
+// handoffURL builds the custom-scheme URL that carries credentials to the app.
+//
+// The values are escaped the way PHP's urlencode does, which is what clients
+// parse: that differs from RFC 3986 in encoding a space as "+" rather than
+// "%20".
+func handoffURL(server, username, password string) string {
+	return fmt.Sprintf("%s://login/server:%s&user:%s&password:%s",
+		handoffScheme, server, url.QueryEscape(username), url.QueryEscape(password))
 }
 
 // randomToken returns a URL-safe secret with 256 bits of entropy.

@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
@@ -224,5 +225,93 @@ func TestDescribeClientIsBounded(t *testing.T) {
 	got := describeClient(strings.Repeat("A", 5000))
 	if len(got) > 100 {
 		t.Errorf("describeClient returned %d chars, want it truncated", len(got))
+	}
+}
+
+// TestLegacyFlowHandsCredentialsToTheApp covers the pairing route the mobile
+// apps use. Unlike the polling flow, the app learns nothing until the browser
+// is redirected to a scheme it registered - which is also what dismisses the
+// in-app browser. Without that redirect the page simply sits there after a
+// successful sign-in, looking like a hang.
+func TestLegacyFlowHandsCredentialsToTheApp(t *testing.T) {
+	lf, _ := testLoginFlow(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET "+LegacyFlowPath, lf.LegacyPage)
+	mux.HandleFunc("POST "+LegacyFlowPath, lf.LegacyPage)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, LegacyFlowPath, nil)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (iPhone) Nextcloud-iOS/4.9.0")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login page: status = %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "Nextcloud-iOS 4.9.0 on iOS") {
+		t.Error("the page does not name the requesting device")
+	}
+
+	form := url.Values{"username": {"alice"}, "password": {"alice-account-password"}}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, LegacyFlowPath, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("grant: status = %d, want 200", rec.Code)
+	}
+
+	// Unescaped first: the ampersands are written as HTML entities, which is
+	// correct markup and what a browser decodes before navigating.
+	body := html.UnescapeString(rec.Body.String())
+	if !strings.Contains(body, "nc://login/server:https://mirage.example.com&user:alice&password:") {
+		t.Fatalf("the page does not hand credentials to the app:\n%s", body)
+	}
+	// Sent as a navigation the browser performs, not merely a link, so the app
+	// reopens without the user having to do anything.
+	if !strings.Contains(body, `http-equiv="refresh"`) {
+		t.Error("nothing navigates to the handover URL")
+	}
+	// And a visible fallback, for a browser with no handler for the scheme.
+	if !strings.Contains(body, "Tap here if the app does not reopen") {
+		t.Error("there is no fallback for a browser that cannot open the scheme")
+	}
+
+	// The credential handed over must actually work.
+	start := strings.Index(body, "&password:") + len("&password:")
+	end := strings.IndexAny(body[start:], `"`) + start
+	password := body[start:end]
+	if len(password) != appPasswordLen {
+		t.Fatalf("extracted credential is %d characters, want %d: %q", len(password), appPasswordLen, password)
+	}
+	if _, err := lf.auth.Verify(context.Background(), "alice", password); err != nil {
+		t.Errorf("the handed-over credential does not authenticate: %v", err)
+	}
+}
+
+func TestLegacyFlowRejectsBadCredentials(t *testing.T) {
+	lf, _ := testLoginFlow(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST "+LegacyFlowPath, lf.LegacyPage)
+
+	form := url.Values{"username": {"alice"}, "password": {"wrong"}}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, LegacyFlowPath, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "nc://login") {
+		t.Error("a failed sign-in still handed over a credential")
+	}
+}
+
+func TestHandoffURLEscaping(t *testing.T) {
+	got := handoffURL("https://mirage.example.com", "first.last@example.com", "abc+def ghi")
+	// Escaped as PHP's urlencode does, which is what clients parse: a space
+	// becomes "+" rather than "%20".
+	want := "nc://login/server:https://mirage.example.com&user:first.last%40example.com&password:abc%2Bdef+ghi"
+	if got != want {
+		t.Errorf("handoffURL =\n  %s\nwant\n  %s", got, want)
 	}
 }

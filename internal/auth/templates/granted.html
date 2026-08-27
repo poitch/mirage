@@ -1,5 +1,12 @@
 <!doctype html>
 <meta charset="utf-8">
+{{ if .Handoff }}
+{{/* The handover. Following this hands the credentials to the app that
+     registered the scheme, and dismisses the in-app browser it opened. A
+     browser without the scheme registered stays on this page, which is why
+     there is a visible link below rather than only a redirect. */}}
+<meta http-equiv="refresh" content="0; url={{ .Handoff }}">
+{{ end }}
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>Device connected &middot; Mirage</title>
@@ -37,5 +44,12 @@
 <main class="card">
   <div class="tick" aria-hidden="true">&check;</div>
   <h1>Device connected</h1>
-  <p>{{ .Device }} can now sync your files. You can close this window.</p>
+  {{ if .Handoff }}
+    <p>Returning you to {{ .Device }}&hellip;</p>
+    <p style="margin-top:1rem">
+      <a href="{{ .Handoff }}">Tap here if the app does not reopen by itself.</a>
+    </p>
+  {{ else }}
+    <p>{{ .Device }} can now sync your files. You can close this window.</p>
+  {{ end }}
 </main>
