@@ -67,41 +67,64 @@ func (s *Storage) Open(name string) (*os.File, error) {
 // a broken symlink or a file removed mid-listing is not an error worth failing
 // the whole request over, and including it would put a phantom into the index.
 func (s *Storage) ReadDir(name string) ([]fs.DirEntry, error) {
+	entries, _, err := s.readDir(name)
+	return entries, err
+}
+
+// ReadDirReportingSkips lists a directory and additionally names the symlinks
+// it declined to follow.
+//
+// Silently omitting them is how somebody ends up staring at a client wondering
+// where a folder went, which is a worse failure than the omission itself. On a
+// NAS this is not hypothetical: home directories routinely contain links to
+// shared folders elsewhere on the volume.
+func (s *Storage) ReadDirReportingSkips(name string) (entries []fs.DirEntry, skippedLinks []string, err error) {
+	return s.readDir(name)
+}
+
+func (s *Storage) readDir(name string) ([]fs.DirEntry, []string, error) {
 	clean, err := CleanPath(name)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	f, err := s.root.Open(clean)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer f.Close()
 
 	entries, err := f.ReadDir(-1)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
+	var skippedLinks []string
 	out := entries[:0]
 	for _, e := range entries {
 		if IsInternal(e.Name()) {
 			continue
 		}
-		// Only regular files and directories are represented. Info reports on
-		// the entry itself rather than a symlink's target, so symlinks are
-		// filtered out here along with sockets, devices and FIFOs: none of them
-		// have meaning to a sync client, and following a link risks both cycles
-		// and a scan that blocks indefinitely on a special file.
+		// Info reports on the entry itself rather than a symlink's target, so
+		// symlinks land here as ModeSymlink.
 		info, err := e.Info()
 		if err != nil {
 			continue
 		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			// Not followed. A link may point outside the account's directory,
+			// which confinement forbids, and following links in general invites
+			// cycles. Reported so the omission is visible rather than silent.
+			skippedLinks = append(skippedLinks, e.Name())
+			continue
+		}
+		// Sockets, devices and FIFOs have no meaning to a sync client, and a
+		// scan could block indefinitely on one.
 		if !info.Mode().IsRegular() && !info.IsDir() {
 			continue
 		}
 		out = append(out, e)
 	}
-	return out, nil
+	return out, skippedLinks, nil
 }
 
 // Manager holds one Storage per user, opened on demand and reused.

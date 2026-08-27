@@ -38,13 +38,16 @@ func NewScanner(db *store.DB, storage *fsx.Manager, log *slog.Logger) *Scanner {
 
 // Stats summarises one scan.
 type Stats struct {
-	Files    int64
-	Dirs     int64
-	Bytes    int64
-	Moved    int64 // entries recognised as renamed rather than new
-	Removed  int64 // index entries dropped because they are gone from disk
-	Skipped  int64 // directories that could not be read and were left untouched
-	Duration time.Duration
+	Files   int64
+	Dirs    int64
+	Bytes   int64
+	Moved   int64 // entries recognised as renamed rather than new
+	Removed int64 // index entries dropped because they are gone from disk
+	Skipped int64 // directories that could not be read and were left untouched
+	// SkippedLinks counts symbolic links that were not followed. On a NAS these
+	// are usually links into shared folders outside the account's directory.
+	SkippedLinks int64
+	Duration     time.Duration
 }
 
 // ScanUser walks a user's home directory and brings their index up to date.
@@ -87,7 +90,8 @@ func (s *Scanner) ScanUser(ctx context.Context, user store.User) (Stats, error) 
 	s.log.Info("scan complete",
 		"user", user.Username, "files", stats.Files, "dirs", stats.Dirs,
 		"bytes", stats.Bytes, "moved", stats.Moved, "removed", stats.Removed,
-		"skipped", stats.Skipped, "duration", stats.Duration)
+		"skipped", stats.Skipped, "skipped_links", stats.SkippedLinks,
+		"duration", stats.Duration)
 	return stats, nil
 }
 
@@ -110,12 +114,15 @@ func (s *Scanner) scanDir(ctx context.Context, st *fsx.Storage, user store.User,
 		name = ""
 	}
 
-	dirID, err := store.EnsureDirNode(ctx, s.db, user.ID, parentID, dirPath, name, stamp)
+	// Seeded from the directory's own metadata so that a client reading this
+	// row before the scan reaches the end of it sees something sensible.
+	dirID, err := store.EnsureDirNode(ctx, s.db, user.ID, parentID, dirPath, name,
+		info.ModTime(), FileETag(0, info.ModTime()), stamp)
 	if err != nil {
 		return "", 0, fmt.Errorf("index directory %s: %w", dirPath, err)
 	}
 
-	entries, err := st.ReadDir(dirPath)
+	entries, skippedLinks, err := st.ReadDirReportingSkips(dirPath)
 	if err != nil {
 		// Critically, this does not fall through to the delete step below. A
 		// directory that cannot be read right now is not an empty directory:
@@ -138,6 +145,16 @@ func (s *Scanner) scanDir(ctx context.Context, st *fsx.Storage, user store.User,
 			return "", 0, nil
 		}
 		return existing.ETag, existing.Size, nil
+	}
+
+	if len(skippedLinks) > 0 {
+		// Logged at every scan rather than once, because the consequence -
+		// a folder that is on the NAS but never appears on any client - is
+		// otherwise invisible and impossible to guess at.
+		s.log.Warn("not syncing symbolic links; a link may point outside the account's directory",
+			"user", user.Username, "path", dirPath, "links", strings.Join(skippedLinks, ", "),
+			"hint", "map the link target as its own account if it should sync")
+		stats.SkippedLinks += int64(len(skippedLinks))
 	}
 
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })

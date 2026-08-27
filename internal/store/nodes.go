@@ -203,25 +203,36 @@ func CountNodes(ctx context.Context, q Querier, userID int64) (int64, error) {
 //
 // A directory's ETag is derived from its children, so it cannot be known until
 // they have been scanned. This establishes the identity the children need for
-// their parent_id; FinalizeDirNode writes the ETag afterwards. Keeping the old
-// ETag in the meantime means an interrupted scan leaves a stale value rather
-// than a meaningless one.
-func EnsureDirNode(ctx context.Context, q Querier, userID, parentID int64, path, name string, stamp int64) (int64, error) {
+// their parent_id; FinalizeDirNode writes the real ETag afterwards.
+//
+// The provisional values matter more than they look. Between this call and
+// finalizing, the row is visible to clients - a PROPFIND arriving mid-scan, or
+// a directory whose contents could not be read at all, sees whatever is stored
+// here. Left to column defaults that is a modification time of zero, which
+// clients render as 1970, and an empty ETag, which is not a valid ETag at all.
+// So the directory's own timestamp is written up front, and the ETag is seeded
+// from it: wrong until the children are counted, but well-formed and roughly
+// right rather than nonsense.
+//
+// On conflict these are deliberately not overwritten, so a rescan does not
+// clobber a correct ETag with a provisional one.
+func EnsureDirNode(ctx context.Context, q Querier, userID, parentID int64, path, name string,
+	mtime time.Time, provisionalETag string, stamp int64) (int64, error) {
 	var parent any
 	if parentID != 0 {
 		parent = parentID
 	}
 	var id int64
 	err := q.QueryRowContext(ctx, `
-		INSERT INTO nodes (user_id, parent_id, path, name, is_dir, etag, scanned_at)
-		VALUES (?, ?, ?, ?, 1, '', ?)
+		INSERT INTO nodes (user_id, parent_id, path, name, is_dir, mtime, etag, scanned_at)
+		VALUES (?, ?, ?, ?, 1, ?, ?, ?)
 		ON CONFLICT(user_id, path) DO UPDATE SET
 			parent_id  = excluded.parent_id,
 			name       = excluded.name,
 			is_dir     = 1,
 			scanned_at = excluded.scanned_at
 		RETURNING id`,
-		userID, parent, path, name, stamp).Scan(&id)
+		userID, parent, path, name, mtime.Unix(), provisionalETag, stamp).Scan(&id)
 	return id, err
 }
 

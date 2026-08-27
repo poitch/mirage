@@ -73,10 +73,27 @@ const tempPrefix = ".mirage-tmp-"
 // keeps one tenant's uploads inside their own directory like everything else.
 const UploadDir = ".mirage-uploads"
 
-// IsInternal reports whether a directory entry is Mirage's own bookkeeping and
-// should be hidden from clients and the index.
+// ignoredNames are entries that exist on the filesystem but are not the user's
+// files, and must not be indexed or shown to clients.
+//
+// Synology scatters @eaDir through every directory on the volume: it holds
+// thumbnails and indexer metadata, is often large, and syncing it to every
+// device would be pure noise. The others are DSM's own machinery in the same
+// vein. Ignoring an entry only means Mirage does not index it - the directory
+// itself is left entirely alone on disk.
+var ignoredNames = map[string]bool{
+	"@eaDir":    true, // thumbnails and indexer metadata, in every directory
+	"#recycle":  true, // DSM recycle bin for the share
+	"#snapshot": true, // DSM snapshot mount point
+	"@tmp":      true,
+	"@sharebin": true,
+}
+
+// IsInternal reports whether a directory entry should be hidden from clients
+// and the index, either because it is Mirage's own bookkeeping or because it is
+// filesystem machinery that is not the user's data.
 func IsInternal(name string) bool {
-	return strings.HasPrefix(name, tempPrefix) || name == UploadDir
+	return strings.HasPrefix(name, tempPrefix) || name == UploadDir || ignoredNames[name]
 }
 
 // Join appends a child name to a cleaned parent path.

@@ -381,3 +381,64 @@ func TestScanReportsRemovals(t *testing.T) {
 		t.Errorf("Removed = %d, want 1", stats.Removed)
 	}
 }
+
+// TestSymlinksAreSkippedButReported covers the failure that is worst when
+// silent: a folder that exists on the NAS but never appears on any client. On a
+// Synology, home directories routinely link to shared folders elsewhere.
+func TestSymlinksAreSkippedButReported(t *testing.T) {
+	f := newFixture(t)
+	outside := t.TempDir()
+	mustWrite(t, filepath.Join(outside, "shared.txt"), "in a shared folder")
+
+	if err := os.Symlink(outside, filepath.Join(f.home, "Music")); err != nil {
+		t.Skipf("symlinks unavailable here: %v", err)
+	}
+	stats := f.scan(t)
+
+	if stats.SkippedLinks != 1 {
+		t.Errorf("SkippedLinks = %d, want 1; a skipped link must be counted, not dropped quietly",
+			stats.SkippedLinks)
+	}
+	if _, err := store.NodeByPath(context.Background(), f.db, f.user.ID, "Music"); err == nil {
+		t.Error("a symlink was indexed; it may point outside the account's directory")
+	}
+}
+
+// TestSynologyMetadataIsIgnored: @eaDir appears in every directory on a
+// Synology volume and holds thumbnails, not user files.
+func TestSynologyMetadataIsIgnored(t *testing.T) {
+	f := newFixture(t)
+	mustMkdirAll(t, filepath.Join(f.home, "docs", "@eaDir"))
+	mustWrite(t, filepath.Join(f.home, "docs", "@eaDir", "report.txt@SynoThumb"), "thumbnail")
+	mustMkdirAll(t, filepath.Join(f.home, "#recycle"))
+	mustWrite(t, filepath.Join(f.home, "#recycle", "deleted.txt"), "in the bin")
+
+	f.scan(t)
+	for _, p := range []string{"docs/@eaDir", "docs/@eaDir/report.txt@SynoThumb", "#recycle", "#recycle/deleted.txt"} {
+		if _, err := store.NodeByPath(context.Background(), f.db, f.user.ID, p); err == nil {
+			t.Errorf("%q was indexed; filesystem machinery must not sync", p)
+		}
+	}
+	// The real files alongside them are unaffected.
+	if _, err := store.NodeByPath(context.Background(), f.db, f.user.ID, "docs/report.txt"); err != nil {
+		t.Errorf("ignoring metadata also hid a real file: %v", err)
+	}
+}
+
+// TestDirectoryNeverReportsEpochZero: a directory's ETag can only be computed
+// after its children are read, so between being created and being finalised the
+// row is visible to clients. Column defaults would show 1970 and an empty ETag.
+func TestDirectoryNeverReportsEpochZero(t *testing.T) {
+	f := newFixture(t)
+	f.scan(t)
+
+	for _, p := range []string{".", "docs", "docs/nested"} {
+		n := f.node(t, p)
+		if n.MTime.Unix() <= 0 {
+			t.Errorf("%q has modification time %v; clients render that as 1970", p, n.MTime)
+		}
+		if n.ETag == "" {
+			t.Errorf("%q has an empty ETag, which is not a valid ETag", p)
+		}
+	}
+}

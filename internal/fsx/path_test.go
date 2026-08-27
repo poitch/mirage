@@ -61,7 +61,18 @@ func TestIsInternal(t *testing.T) {
 	if !IsInternal(".mirage-tmp-abc123") {
 		t.Error("partial upload should be treated as internal")
 	}
-	for _, name := range []string{"report.txt", ".hidden", ".mirage", "mirage-tmp-x"} {
+	// Synology puts @eaDir in every directory on the volume. Indexing it would
+	// push thumbnails and indexer metadata to every device.
+	for _, name := range []string{"@eaDir", "#recycle", "#snapshot", "@tmp", ".mirage-uploads"} {
+		if !IsInternal(name) {
+			t.Errorf("IsInternal(%q) = false; filesystem machinery must not be indexed", name)
+		}
+	}
+	// Real files that merely resemble them must still sync.
+	for _, name := range []string{
+		"report.txt", ".hidden", ".mirage", "mirage-tmp-x",
+		"@eaDir.txt", "recycle", "#recycled", "my@eaDir",
+	} {
 		if IsInternal(name) {
 			t.Errorf("IsInternal(%q) = true, want false", name)
 		}

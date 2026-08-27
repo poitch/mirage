@@ -106,12 +106,14 @@ func (u *Updater) DirCreated(ctx context.Context, user store.User, dirPath strin
 		if err != nil {
 			return err
 		}
-		id, err := store.EnsureDirNode(ctx, tx, user.ID, parent.ID, dirPath, path.Base(dirPath), store.Stamp())
+		now := time.Now()
+		id, err := store.EnsureDirNode(ctx, tx, user.ID, parent.ID, dirPath, path.Base(dirPath),
+			now, DirETag(nil), store.Stamp())
 		if err != nil {
 			return err
 		}
 		// A new directory is empty, so its ETag is the empty-children digest.
-		if err := store.FinalizeDirNode(ctx, tx, id, DirETag(nil), 0, time.Now(), store.Stamp()); err != nil {
+		if err := store.FinalizeDirNode(ctx, tx, id, DirETag(nil), 0, now, store.Stamp()); err != nil {
 			return err
 		}
 		if err := propagate(ctx, tx, user.ID, path.Dir(dirPath)); err != nil {
