@@ -21,6 +21,17 @@ const progressKey = "scan_progress"
 // large tree touches hundreds of thousands of files, so this cannot be per file.
 const progressInterval = 5 * time.Second
 
+// staleAfter is how long without an update before a scan is reported as
+// interrupted rather than running.
+//
+// Generous on purpose. Progress is throttled to progressInterval, but the
+// throttle only fires when the scan reaches a point that reports, and a single
+// directory holding tens of thousands of files - a photo library's derivatives,
+// say - takes a while to work through on spinning disks. Too tight a threshold
+// declares a healthy scan dead, which is worse than noticing a real stall a
+// minute late.
+const staleAfter = 90 * time.Second
+
 // Progress is a point-in-time view of a running or finished scan.
 type Progress struct {
 	User      string    `json:"user"`
@@ -54,7 +65,7 @@ func (p Progress) Rate() float64 {
 // Stale reports whether the record looks abandoned rather than live, which is
 // what a scan interrupted by a restart leaves behind.
 func (p Progress) Stale() bool {
-	return !p.Done && time.Since(p.UpdatedAt) > 4*progressInterval
+	return !p.Done && time.Since(p.UpdatedAt) > staleAfter
 }
 
 // ScanProgress returns the most recent scan progress, if any has been recorded.

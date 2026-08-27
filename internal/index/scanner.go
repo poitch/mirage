@@ -182,6 +182,13 @@ func (s *Scanner) scanDir(ctx context.Context, st *fsx.Storage, user store.User,
 			continue
 		}
 
+		// Reported from inside the loop, not only once per directory: a
+		// directory can hold tens of thousands of files, and updating only on
+		// entry leaves a scan that is working steadily looking stopped.
+		if progress != nil {
+			progress.update(ctx, stats, childPath)
+		}
+
 		childInfo, err := entry.Info()
 		if err != nil {
 			// The file vanished between listing and stat. Drop it from this
