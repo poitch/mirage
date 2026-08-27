@@ -203,7 +203,7 @@ func (w *Watcher) consume(ctx context.Context, fsw *fsnotify.Watcher) error {
 				// The kernel queue overflowed, so an unknown set of changes was
 				// lost. A full rescan is the only way back to a known state.
 				w.log.Warn("filesystem event queue overflowed; forcing a rescan")
-				if err := w.scanner.ScanAll(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				if err := w.scanner.ScanAll(ctx, "filesystem event queue overflowed"); err != nil && !errors.Is(err, context.Canceled) {
 					w.log.Error("recovery rescan failed", "error", err)
 				}
 				continue

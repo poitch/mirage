@@ -19,10 +19,11 @@ type Storage struct {
 	uid, gid int
 	fileMode fs.FileMode
 	dirMode  fs.FileMode
+	exclude  *Excluder
 }
 
 // Open opens a user's home directory for confined access.
-func Open(home string, uid, gid int, fileMode, dirMode fs.FileMode) (*Storage, error) {
+func Open(home string, uid, gid int, fileMode, dirMode fs.FileMode, exclude *Excluder) (*Storage, error) {
 	root, err := os.OpenRoot(home)
 	if err != nil {
 		return nil, fmt.Errorf("open home %s: %w", home, err)
@@ -31,6 +32,7 @@ func Open(home string, uid, gid int, fileMode, dirMode fs.FileMode) (*Storage, e
 		root: root, home: home,
 		uid: uid, gid: gid,
 		fileMode: fileMode.Perm(), dirMode: dirMode.Perm(),
+		exclude: exclude,
 	}, nil
 }
 
@@ -101,7 +103,7 @@ func (s *Storage) readDir(name string) ([]fs.DirEntry, []string, error) {
 	var skippedLinks []string
 	out := entries[:0]
 	for _, e := range entries {
-		if IsInternal(e.Name()) {
+		if IsInternal(e.Name()) || s.exclude.Excludes(e.Name()) {
 			continue
 		}
 		// Info reports on the entry itself rather than a symlink's target, so
@@ -136,15 +138,17 @@ type Manager struct {
 	byUser   map[int64]*Storage
 	fileMode fs.FileMode
 	dirMode  fs.FileMode
+	exclude  *Excluder
 	closed   bool
 }
 
 // NewManager builds a Manager applying the given permissions to new files.
-func NewManager(fileMode, dirMode fs.FileMode) *Manager {
+func NewManager(fileMode, dirMode fs.FileMode, exclude *Excluder) *Manager {
 	return &Manager{
 		byUser:   make(map[int64]*Storage),
 		fileMode: fileMode.Perm(),
 		dirMode:  dirMode.Perm(),
+		exclude:  exclude,
 	}
 }
 
@@ -173,7 +177,7 @@ func (m *Manager) For(userID int64, home string, uid, gid int) (*Storage, error)
 	if m.closed {
 		return nil, ErrClosed
 	}
-	s, err := Open(home, uid, gid, m.fileMode, m.dirMode)
+	s, err := Open(home, uid, gid, m.fileMode, m.dirMode, m.exclude)
 	if err != nil {
 		return nil, err
 	}

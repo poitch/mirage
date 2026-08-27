@@ -23,11 +23,33 @@ storage:
   file_mode: "0640"
   dir_mode: "0750"
 
-  # Full reconciliation walk. This is the backstop that catches changes made
-  # over SMB or in File Station when the filesystem watcher misses them, so
-  # leave it on even with the watcher enabled.
-  rescan_interval: 15m
+  # How long to wait *between* full reconciliation walks. This is the backstop
+  # that catches changes made over SMB or in File Station when the filesystem
+  # watcher misses them.
+  #
+  # The gap is measured from the end of one walk to the start of the next, so a
+  # walk that takes longer than the interval does not queue the next one. Even
+  # so, set this against how long a walk actually takes on your share - the
+  # "scan complete" log line reports it. On a large share a walk can take the
+  # better part of an hour, and an interval near that keeps the disks working
+  # almost continuously for very little benefit. Hours, not minutes, is right
+  # for a big share. Zero disables it and leaves everything to the watcher.
+  rescan_interval: 6h
   watcher: true
+
+  # Entry names never indexed or synced, matched at any depth. filepath.Match
+  # syntax, so "*.tmp" works as well as a plain name.
+  #
+  # Nothing is excluded by default: these are your files. The reason to set it
+  # is cost. A source checkout's .svn directory or a node_modules tree can hold
+  # millions of tiny files that dominate every scan and are rebuilt from
+  # elsewhere anyway; excluding them can take a walk from an hour to minutes.
+  # Excluding something already synced makes it disappear from clients, which
+  # does not touch the copies on the NAS.
+  exclude: []
+  #  - .svn
+  #  - node_modules
+  #  - .git
 
 # Accounts are managed from the admin page at /admin, so there is usually no
 # users: section here at all. Sign in with MIRAGE_ADMIN_USERNAME and

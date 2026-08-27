@@ -94,7 +94,9 @@ func cmdLs(args []string) error {
 
 	// What the filesystem holds, for comparison. A name here but not above
 	// means the index is behind; the reverse means it was deleted out of band.
-	storage := fsx.NewManager(cfg.Storage.FileMode.Perm(), cfg.Storage.DirMode.Perm())
+	// Already validated when the config loaded, so this cannot fail here.
+	excluder, _ := fsx.NewExcluder(cfg.Storage.Exclude)
+	storage := fsx.NewManager(cfg.Storage.FileMode.Perm(), cfg.Storage.DirMode.Perm(), excluder)
 	defer storage.Close()
 	st, err := storage.For(user.ID, user.Home, user.UID, user.GID)
 	if err != nil {

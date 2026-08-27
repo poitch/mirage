@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/poitch/mirage/internal/account"
+	"github.com/poitch/mirage/internal/fsx"
 	"gopkg.in/yaml.v3"
 )
 
@@ -69,6 +70,14 @@ type Storage struct {
 	// Watcher enables the fsnotify watcher. Disabling it leaves reconciliation
 	// entirely to RescanInterval, which is slower but still correct.
 	Watcher bool `yaml:"watcher"`
+	// Exclude lists entry names that are not indexed or synced, matched against
+	// the name at any depth using filepath.Match syntax.
+	//
+	// Nothing is excluded by default: these are the user's files, and only they
+	// can say which of them are worth syncing. The reason to set it is cost -
+	// a source checkout's .svn directory or a node_modules tree can hold
+	// millions of tiny files that dominate a scan and are rebuilt anyway.
+	Exclude []string `yaml:"exclude"`
 }
 
 // User maps a Mirage account onto a directory on the NAS filesystem.
@@ -162,6 +171,11 @@ func (c *Config) Validate() error {
 	}
 	if c.Storage.RescanInterval < 0 {
 		return fmt.Errorf("storage.rescan_interval must not be negative")
+	}
+	// Compiled here so a malformed pattern is a startup error rather than
+	// something that silently matches nothing for the life of the server.
+	if _, err := fsx.NewExcluder(c.Storage.Exclude); err != nil {
+		return fmt.Errorf("storage.exclude: %w", err)
 	}
 	// The same rules apply to accounts created through the admin page, so they
 	// live in one place rather than being restated here.

@@ -97,7 +97,7 @@ func newHarness(t *testing.T) *harness {
 	}
 	t.Cleanup(func() { srv.storage.Close() })
 
-	if err := srv.scanner.ScanAll(ctx); err != nil {
+	if err := srv.scanner.ScanAll(ctx, "test"); err != nil {
 		t.Fatalf("initial scan: %v", err)
 	}
 
@@ -845,7 +845,7 @@ func TestTenantIsolation(t *testing.T) {
 			t.Fatalf("symlink: %v", err)
 		}
 		defer os.Remove(link)
-		if err := h.server.scanner.ScanAll(context.Background()); err != nil {
+		if err := h.server.scanner.ScanAll(context.Background(), "test"); err != nil {
 			t.Fatalf("rescan: %v", err)
 		}
 

@@ -18,6 +18,7 @@ storage:
   # Short for testing. Until the watcher lands this is how long a file added
   # outside Mirage takes to reach clients.
   rescan_interval: 30s
+  exclude: []
   watcher: true
 
 # No users: section, so accounts are managed from the admin page at /admin.

@@ -1,0 +1,43 @@
+package server
+
+import (
+	"testing"
+	"time"
+)
+
+// TestRescanIntervalIsAGapNotASchedule documents the behaviour the timer gives
+// and a ticker does not.
+//
+// A ticker fires on a fixed schedule, so a scan lasting longer than the
+// interval leaves a tick already waiting the moment it finishes, and the next
+// scan starts immediately. On a share where a pass takes far longer than any
+// sensible interval that is continuous scanning with no idle time at all -
+// which looks, from the outside, exactly like a scan that never ends.
+func TestRescanIntervalIsAGapNotASchedule(t *testing.T) {
+	const interval = 40 * time.Millisecond
+	const scanTime = 100 * time.Millisecond // deliberately longer than the interval
+
+	// What a ticker does: ticks accumulate during the scan.
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	time.Sleep(scanTime)
+	select {
+	case <-ticker.C:
+		// Expected: a tick was already waiting before the scan "finished".
+	default:
+		t.Fatal("a ticker did not queue a tick during a long scan; the premise is wrong")
+	}
+
+	// What the timer does: reset after the scan, so the wait starts fresh.
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	<-timer.C
+	time.Sleep(scanTime)
+	timer.Reset(interval)
+	select {
+	case <-timer.C:
+		t.Fatal("the timer fired immediately after a long scan; the gap was not honoured")
+	default:
+		// Expected: the next scan waits a full interval.
+	}
+}

@@ -50,7 +50,9 @@ func New(ctx context.Context, cfg *config.Config, db *store.DB, log *slog.Logger
 		return nil, fmt.Errorf("read instance id: %w", err)
 	}
 
-	storage := fsx.NewManager(cfg.Storage.FileMode.Perm(), cfg.Storage.DirMode.Perm())
+	// Already validated when the config loaded, so this cannot fail here.
+	excluder, _ := fsx.NewExcluder(cfg.Storage.Exclude)
+	storage := fsx.NewManager(cfg.Storage.FileMode.Perm(), cfg.Storage.DirMode.Perm(), excluder)
 	scanner := index.NewScanner(db, storage, log)
 	updater := index.NewUpdater(db)
 	watcher := index.NewWatcher(db, storage, scanner, updater, log)
@@ -277,7 +279,7 @@ func (s *Server) rescan(ctx context.Context) {
 			"last_at", p.Current)
 	}
 
-	if err := s.scanner.ScanAll(ctx); err != nil && !errors.Is(err, context.Canceled) {
+	if err := s.scanner.ScanAll(ctx, "server started"); err != nil && !errors.Is(err, context.Canceled) {
 		s.log.Error("initial scan failed", "error", err)
 	}
 
@@ -285,16 +287,37 @@ func (s *Server) rescan(ctx context.Context) {
 		s.log.Warn("periodic rescan is disabled; changes made outside Mirage will not be seen")
 		return
 	}
-	ticker := time.NewTicker(s.cfg.Storage.RescanInterval.Duration())
-	defer ticker.Stop()
+	// A timer reset after each scan, deliberately not a ticker. A ticker fires
+	// on a fixed schedule, so a scan that takes longer than the interval leaves
+	// a tick already waiting when it finishes and the next scan begins at once.
+	// On a large share, where a pass takes far longer than any sensible
+	// interval, that means scanning without pause forever - the disks never go
+	// quiet and nothing ever says why. Resetting after the scan makes the
+	// interval mean what it reads like: the gap between scans.
+	interval := s.cfg.Storage.RescanInterval.Duration()
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			if err := s.scanner.ScanAll(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		case <-timer.C:
+			started := time.Now()
+			if err := s.scanner.ScanAll(ctx, "periodic rescan"); err != nil && !errors.Is(err, context.Canceled) {
 				s.log.Error("rescan failed", "error", err)
 			}
+			if taken := time.Since(started); taken > interval {
+				// Worth saying plainly: the setting cannot do what it says, and
+				// the operator is the only one who can decide what to do about
+				// it - raise the interval, or exclude what is expensive.
+				s.log.Warn("a rescan takes longer than the interval between them; "+
+					"the next begins after the configured gap regardless",
+					"took", taken.Round(time.Second), "interval", interval,
+					"hint", "raise storage.rescan_interval, or exclude directories "+
+						"that are costly to index with storage.exclude")
+			}
+			timer.Reset(interval)
 		}
 	}
 }

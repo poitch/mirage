@@ -157,7 +157,7 @@ func TestPushNotifiesOnOutOfBandChange(t *testing.T) {
 	expectMessage(t, conn, "authentication")
 
 	writeFile(t, filepath.Join(h.homes["alice"], "from-smb.txt"), "arrived out of band")
-	if err := h.server.scanner.ScanAll(context.Background()); err != nil {
+	if err := h.server.scanner.ScanAll(context.Background(), "test"); err != nil {
 		t.Fatalf("rescan: %v", err)
 	}
 
@@ -173,7 +173,7 @@ func TestScanWithoutChangesIsSilent(t *testing.T) {
 	conn := h.dialPush(t, "alice", alicePassword)
 	expectMessage(t, conn, "authentication")
 
-	if err := h.server.scanner.ScanAll(context.Background()); err != nil {
+	if err := h.server.scanner.ScanAll(context.Background(), "test"); err != nil {
 		t.Fatalf("rescan: %v", err)
 	}
 

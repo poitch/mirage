@@ -182,7 +182,7 @@ func TestOwnershipReporting(t *testing.T) {
 	home, _ := testHome(t)
 
 	t.Run("matching owner needs no chown", func(t *testing.T) {
-		s, err := Open(home, os.Geteuid(), os.Getegid(), 0o640, 0o750)
+		s, err := Open(home, os.Getuid(), os.Getgid(), 0o640, 0o750, nil)
 		if err != nil {
 			t.Fatalf("Open: %v", err)
 		}
@@ -199,7 +199,7 @@ func TestOwnershipReporting(t *testing.T) {
 
 	t.Run("foreign owner", func(t *testing.T) {
 		const foreignUID, foreignGID = 12345, 12345
-		s, err := Open(home, foreignUID, foreignGID, 0o640, 0o750)
+		s, err := Open(home, foreignUID, foreignGID, 0o640, 0o750, nil)
 		if err != nil {
 			t.Fatalf("Open: %v", err)
 		}
@@ -240,7 +240,7 @@ func TestOwnershipReporting(t *testing.T) {
 			t.Skip("requires root to chown to another user")
 		}
 		const foreignUID, foreignGID = 12346, 12346
-		s, err := Open(home, foreignUID, foreignGID, 0o640, 0o750)
+		s, err := Open(home, foreignUID, foreignGID, 0o640, 0o750, nil)
 		if err != nil {
 			t.Fatalf("Open: %v", err)
 		}

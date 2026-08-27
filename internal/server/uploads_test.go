@@ -248,7 +248,7 @@ func TestUploadScratchIsInvisible(t *testing.T) {
 		t.Error("the upload scratch area appeared in a file listing")
 	}
 
-	if err := h.server.scanner.ScanAll(context.Background()); err != nil {
+	if err := h.server.scanner.ScanAll(context.Background(), "test"); err != nil {
 		t.Fatalf("rescan: %v", err)
 	}
 	resp = h.propfind("/remote.php/dav/files/alice/", "alice", alicePassword, "infinity")

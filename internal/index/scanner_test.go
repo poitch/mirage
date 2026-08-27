@@ -43,7 +43,7 @@ func newFixture(t *testing.T) *fixture {
 	}
 	user, _ := db.UserByName(ctx, "alice")
 
-	mgr := fsx.NewManager(0o640, 0o750)
+	mgr := fsx.NewManager(0o640, 0o750, nil)
 	t.Cleanup(func() { mgr.Close() })
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -629,5 +629,39 @@ func TestRescanNoticesSameLengthEdit(t *testing.T) {
 	}
 	if after.ID != before.ID {
 		t.Error("noticing the edit changed the file's ID")
+	}
+}
+
+// TestScanHonoursExclusions covers the setting that makes a huge share
+// tractable: whole subtrees of build output or version-control metadata can be
+// left out of the index entirely.
+func TestScanHonoursExclusions(t *testing.T) {
+	f := newFixture(t)
+	mustMkdirAll(t, filepath.Join(f.home, "code", ".svn", "text-base"))
+	mustWrite(t, filepath.Join(f.home, "code", ".svn", "text-base", "a.svn-base"), "metadata")
+	mustMkdirAll(t, filepath.Join(f.home, "code", "node_modules", "pkg"))
+	mustWrite(t, filepath.Join(f.home, "code", "node_modules", "pkg", "index.js"), "code")
+	mustWrite(t, filepath.Join(f.home, "code", "main.go"), "package main")
+
+	excluder, err := fsx.NewExcluder([]string{".svn", "node_modules"})
+	if err != nil {
+		t.Fatalf("NewExcluder: %v", err)
+	}
+	mgr := fsx.NewManager(0o640, 0o750, excluder)
+	t.Cleanup(func() { mgr.Close() })
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	scanner := NewScanner(f.db, mgr, log)
+
+	if _, err := scanner.ScanUser(context.Background(), f.user); err != nil {
+		t.Fatalf("ScanUser: %v", err)
+	}
+
+	for _, p := range []string{"code/.svn", "code/.svn/text-base", "code/node_modules", "code/node_modules/pkg/index.js"} {
+		if _, err := store.NodeByPath(context.Background(), f.db, f.user.ID, p); err == nil {
+			t.Errorf("%q was indexed despite being excluded", p)
+		}
+	}
+	if _, err := store.NodeByPath(context.Background(), f.db, f.user.ID, "code/main.go"); err != nil {
+		t.Errorf("an excluded sibling hid a real file: %v", err)
 	}
 }

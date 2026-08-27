@@ -87,3 +87,40 @@ func TestJoin(t *testing.T) {
 		t.Errorf("Join(docs, a.txt) = %q, want docs/a.txt", got)
 	}
 }
+
+func TestExcluder(t *testing.T) {
+	e, err := NewExcluder([]string{".svn", "node_modules", "*.tmp"})
+	if err != nil {
+		t.Fatalf("NewExcluder: %v", err)
+	}
+	for _, name := range []string{".svn", "node_modules", "build.tmp", ".tmp"} {
+		if !e.Excludes(name) {
+			t.Errorf("Excludes(%q) = false, want true", name)
+		}
+	}
+	for _, name := range []string{"svn", "node_modules.txt", "tmp", "report.txt", ".svnignore"} {
+		if e.Excludes(name) {
+			t.Errorf("Excludes(%q) = true, want false", name)
+		}
+	}
+
+	// A nil Excluder is the no-exclusions case and must be usable.
+	var none *Excluder
+	if none.Excludes("anything") {
+		t.Error("a nil Excluder excluded something")
+	}
+	if len(none.Patterns()) != 0 {
+		t.Error("a nil Excluder reported patterns")
+	}
+}
+
+// TestExcluderRejectsMalformedPatterns: a bad pattern that silently matched
+// nothing would look like a working exclusion that never fires.
+func TestExcluderRejectsMalformedPatterns(t *testing.T) {
+	if _, err := NewExcluder([]string{"["}); err == nil {
+		t.Error("a malformed pattern was accepted")
+	}
+	if _, err := NewExcluder([]string{""}); err == nil {
+		t.Error("an empty pattern was accepted")
+	}
+}

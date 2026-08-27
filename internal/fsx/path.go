@@ -4,6 +4,8 @@ package fsx
 
 import (
 	"errors"
+	"fmt"
+	"path/filepath"
 	"strings"
 )
 
@@ -94,6 +96,53 @@ var ignoredNames = map[string]bool{
 // filesystem machinery that is not the user's data.
 func IsInternal(name string) bool {
 	return strings.HasPrefix(name, tempPrefix) || name == UploadDir || ignoredNames[name]
+}
+
+// Excluder decides whether an entry is excluded by operator configuration.
+//
+// This is separate from IsInternal, which covers entries that are never anyone's
+// data. Exclusions are a choice: a checkout's .svn directory or a node_modules
+// tree can run to millions of tiny files that cost more to index than they are
+// worth syncing, but they are still the user's files and somebody may want them.
+type Excluder struct {
+	patterns []string
+}
+
+// NewExcluder compiles exclusion patterns, which are matched against an entry's
+// name - not its path - so "node_modules" excludes it at any depth.
+//
+// Patterns use filepath.Match syntax, so "*.tmp" works as well as a plain name.
+func NewExcluder(patterns []string) (*Excluder, error) {
+	for _, p := range patterns {
+		if p == "" {
+			return nil, errors.New("an exclusion pattern must not be empty")
+		}
+		if _, err := filepath.Match(p, "probe"); err != nil {
+			return nil, fmt.Errorf("exclusion pattern %q is malformed: %w", p, err)
+		}
+	}
+	return &Excluder{patterns: patterns}, nil
+}
+
+// Excludes reports whether an entry name is excluded.
+func (e *Excluder) Excludes(name string) bool {
+	if e == nil {
+		return false
+	}
+	for _, p := range e.patterns {
+		if ok, err := filepath.Match(p, name); err == nil && ok {
+			return true
+		}
+	}
+	return false
+}
+
+// Patterns returns the configured patterns, for reporting.
+func (e *Excluder) Patterns() []string {
+	if e == nil {
+		return nil
+	}
+	return e.patterns
 }
 
 // Join appends a child name to a cleaned parent path.

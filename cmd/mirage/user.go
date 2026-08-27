@@ -87,7 +87,7 @@ func cmdUser(args []string) error {
 		return userList(ctx, db)
 	case "add":
 		return userAdd(ctx, db, log, cfg.Storage.FileMode.Perm(), cfg.Storage.DirMode.Perm(),
-			username, addHome, addUID, addGID, addName, addQuota)
+			cfg.Storage.Exclude, username, addHome, addUID, addGID, addName, addQuota)
 	case "passwd":
 		return userPasswd(ctx, db, username)
 	case "enable", "disable":
@@ -131,7 +131,7 @@ func userList(ctx context.Context, db *store.DB) error {
 }
 
 func userAdd(ctx context.Context, db *store.DB, log *slog.Logger, fileMode, dirMode fs.FileMode,
-	username, home string, uid, gid int, displayName string, quotaGB float64) error {
+	exclude []string, username, home string, uid, gid int, displayName string, quotaGB float64) error {
 	if home == "" {
 		return errors.New("-home is required; give the path as seen inside the container")
 	}
@@ -164,7 +164,8 @@ func userAdd(ctx context.Context, db *store.DB, log *slog.Logger, fileMode, dirM
 	// Index it now: until an account's root is in the index, every request for
 	// it answers 404, and the account would look broken until the next scan.
 	if p.OK() {
-		storage := fsx.NewManager(fileMode, dirMode)
+		excluder, _ := fsx.NewExcluder(exclude)
+		storage := fsx.NewManager(fileMode, dirMode, excluder)
 		defer storage.Close()
 		stats, err := index.NewScanner(db, storage, log).ScanUser(ctx, created)
 		if err != nil {

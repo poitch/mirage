@@ -37,7 +37,7 @@ func testHome(t *testing.T) (home, outside string) {
 func testStorage(t *testing.T) (*Storage, string) {
 	t.Helper()
 	home, outside := testHome(t)
-	s, err := Open(home, os.Getuid(), os.Getgid(), 0o640, 0o750)
+	s, err := Open(home, os.Getuid(), os.Getgid(), 0o640, 0o750, nil)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestStorageSurvivesSymlinkedHome(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 
-	s, err := Open(link, os.Getuid(), os.Getgid(), 0o640, 0o750)
+	s, err := Open(link, os.Getuid(), os.Getgid(), 0o640, 0o750, nil)
 	if err != nil {
 		t.Fatalf("Open through symlinked home: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestReadDirHidesInternalAndSpecialEntries(t *testing.T) {
 
 func TestManagerReusesAndForgets(t *testing.T) {
 	home, _ := testHome(t)
-	m := NewManager(0o640, 0o750)
+	m := NewManager(0o640, 0o750, nil)
 	defer m.Close()
 
 	a, err := m.For(1, home, os.Getuid(), os.Getgid())
@@ -210,7 +210,7 @@ func TestManagerReusesAndForgets(t *testing.T) {
 }
 
 func TestManagerRejectsMissingHome(t *testing.T) {
-	m := NewManager(0o640, 0o750)
+	m := NewManager(0o640, 0o750, nil)
 	defer m.Close()
 
 	if _, err := m.For(1, filepath.Join(t.TempDir(), "nope"), 0, 0); err == nil {
@@ -220,7 +220,7 @@ func TestManagerRejectsMissingHome(t *testing.T) {
 
 func TestManagerAfterClose(t *testing.T) {
 	home, _ := testHome(t)
-	m := NewManager(0o640, 0o750)
+	m := NewManager(0o640, 0o750, nil)
 	if err := m.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}

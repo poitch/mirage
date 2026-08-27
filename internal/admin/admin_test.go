@@ -50,7 +50,7 @@ func newFixture(t *testing.T, configManagesUsers bool) *fixture {
 	t.Setenv(EnvPassword, adminPassword)
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	storage := fsx.NewManager(0o640, 0o750)
+	storage := fsx.NewManager(0o640, 0o750, nil)
 	t.Cleanup(func() { storage.Close() })
 
 	ad, err := New(db, storage, index.NewScanner(db, storage, log),
@@ -144,7 +144,7 @@ func TestDisabledWithoutPassword(t *testing.T) {
 	defer db.Close()
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	storage := fsx.NewManager(0o640, 0o750)
+	storage := fsx.NewManager(0o640, 0o750, nil)
 	defer storage.Close()
 
 	// No password means the page is not built at all, so it is never routed.
@@ -166,7 +166,7 @@ func TestRejectsShortAdminPassword(t *testing.T) {
 	defer db.Close()
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	storage := fsx.NewManager(0o640, 0o750)
+	storage := fsx.NewManager(0o640, 0o750, nil)
 	defer storage.Close()
 
 	if _, err := New(db, storage, index.NewScanner(db, storage, log),

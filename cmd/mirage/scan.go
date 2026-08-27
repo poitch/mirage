@@ -34,7 +34,9 @@ func cmdScan(args []string) error {
 	defer db.Close()
 	ctx := context.Background()
 
-	storage := fsx.NewManager(cfg.Storage.FileMode.Perm(), cfg.Storage.DirMode.Perm())
+	// Already validated when the config loaded, so this cannot fail here.
+	excluder, _ := fsx.NewExcluder(cfg.Storage.Exclude)
+	storage := fsx.NewManager(cfg.Storage.FileMode.Perm(), cfg.Storage.DirMode.Perm(), excluder)
 	defer storage.Close()
 	scanner := index.NewScanner(db, storage, log)
 

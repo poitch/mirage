@@ -505,15 +505,18 @@ func escapeLikePrefix(p string) string {
 	return r.Replace(p)
 }
 
-// ScanAll scans every enabled user in turn.
+// ScanAll scans every enabled user in turn. reason is recorded in the log so
+// that a scan's origin is visible afterwards rather than having to be guessed
+// at from timing.
 //
 // A failure for one user is logged and the rest continue: one bad mount should
 // not leave every other tenant unindexed.
-func (s *Scanner) ScanAll(ctx context.Context) error {
+func (s *Scanner) ScanAll(ctx context.Context, reason string) error {
 	users, err := s.db.ListUsers(ctx)
 	if err != nil {
 		return fmt.Errorf("list users: %w", err)
 	}
+	s.log.Info("scan starting", "reason", reason, "accounts", len(users))
 	for _, u := range users {
 		if u.Disabled {
 			continue
