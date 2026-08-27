@@ -28,6 +28,7 @@ Commands:
   serve      Run the server
   doctor     Check the config and the health of each user's storage
   scan       Rebuild the file index from disk
+  ls         Show what is indexed for an account, and what is not
   user       Inspect accounts and manage credentials
   version    Print the version
 
@@ -59,6 +60,8 @@ func run() error {
 		return cmdDoctor(args)
 	case "scan":
 		return cmdScan(args)
+	case "ls":
+		return cmdLs(args)
 	case "user":
 		return cmdUser(args)
 	case "version":
