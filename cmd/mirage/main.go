@@ -32,9 +32,13 @@ Commands:
   user       Inspect accounts and manage credentials
   version    Print the version
 
-User accounts and their NAS directory mappings are defined in the config file,
-which is the single source of truth for them. Use "mirage doctor" after editing
-it to confirm the mapping is sound.
+Accounts are managed from the admin page at /admin, and the commands here cover
+scripting and the case where no admin password is set. If the config file
+declares a users: section it is authoritative instead, and the admin page
+becomes read-only.
+
+Use "mirage doctor" to check the config and each account's storage, and
+"mirage ls" when a folder is not appearing on a client.
 
 Run "mirage <command> -h" for command-specific flags.
 `
