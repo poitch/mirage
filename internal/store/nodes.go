@@ -214,8 +214,11 @@ func CountNodes(ctx context.Context, q Querier, userID int64) (int64, error) {
 // from it: wrong until the children are counted, but well-formed and roughly
 // right rather than nonsense.
 //
-// On conflict these are deliberately not overwritten, so a rescan does not
-// clobber a correct ETag with a provisional one.
+// On conflict a real value is left alone, so a rescan does not clobber a
+// correct ETag with a provisional one - but a provisional value that is still
+// sitting there is repaired. A scan interrupted before it finished a directory
+// leaves exactly that, and without the repair those rows would keep reporting
+// 1970 and an empty ETag until some future scan happened to complete.
 func EnsureDirNode(ctx context.Context, q Querier, userID, parentID int64, path, name string,
 	mtime time.Time, provisionalETag string, stamp int64) (int64, error) {
 	var parent any
@@ -230,6 +233,8 @@ func EnsureDirNode(ctx context.Context, q Querier, userID, parentID int64, path,
 			parent_id  = excluded.parent_id,
 			name       = excluded.name,
 			is_dir     = 1,
+			etag       = CASE WHEN nodes.etag = ''  THEN excluded.etag  ELSE nodes.etag  END,
+			mtime      = CASE WHEN nodes.mtime <= 0 THEN excluded.mtime ELSE nodes.mtime END,
 			scanned_at = excluded.scanned_at
 		RETURNING id`,
 		userID, parent, path, name, mtime.Unix(), provisionalETag, stamp).Scan(&id)

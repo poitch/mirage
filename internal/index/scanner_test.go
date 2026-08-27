@@ -442,3 +442,33 @@ func TestDirectoryNeverReportsEpochZero(t *testing.T) {
 		}
 	}
 }
+
+// TestInterruptedScanLeavesNoEpochZeroRows covers what a scan that was stopped
+// partway leaves behind. Restarting the server begins the walk again, and until
+// it reaches a given directory that directory's row is whatever the previous,
+// unfinished pass created - which must not be 1970 with an empty ETag.
+func TestInterruptedScanLeavesNoEpochZeroRows(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	// Stand in for an interrupted scan: rows created but never finalised, which
+	// is exactly what EnsureDirNode leaves before its children are read.
+	f.scan(t)
+	if _, err := f.db.ExecContext(ctx,
+		`UPDATE nodes SET etag = '', mtime = 0 WHERE user_id = ? AND is_dir = 1`,
+		f.user.ID); err != nil {
+		t.Fatalf("simulate interrupted scan: %v", err)
+	}
+
+	// A fresh pass must repair them rather than preserve the provisional state.
+	f.scan(t)
+	for _, p := range []string{".", "docs", "docs/nested"} {
+		n := f.node(t, p)
+		if n.MTime.Unix() <= 0 {
+			t.Errorf("%q still reports the epoch after a rescan", p)
+		}
+		if n.ETag == "" {
+			t.Errorf("%q still has an empty ETag after a rescan", p)
+		}
+	}
+}
