@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
@@ -122,6 +123,17 @@ func (f *fixture) post(t *testing.T, c *http.Client, path string, form url.Value
 		t.Fatalf("POST %s: %v", path, err)
 	}
 	return resp
+}
+
+// readBody consumes a response body, closing it.
+func readBody(t *testing.T, resp *http.Response) string {
+	t.Helper()
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	return string(b)
 }
 
 func (f *fixture) get(t *testing.T, c *http.Client, path string) (int, string) {
@@ -376,3 +388,107 @@ func TestSignOutEndsTheSession(t *testing.T) {
 }
 
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }
+
+// TestDeviceSetupCodeSignsIn covers the point of the code: what it contains has
+// to actually authenticate, or somebody scans it and gets a login screen.
+func TestDeviceSetupCodeSignsIn(t *testing.T) {
+	f := newFixture(t, false)
+	c, csrf := f.signIn(t)
+
+	f.post(t, c, "/admin/users", url.Values{
+		"csrf": {csrf}, "username": {"ana"},
+		"home": {filepath.Join(f.homes, "alice")}, "uid": {"1026"}, "gid": {"100"},
+	}).Body.Close()
+	u, err := f.db.UserByName(context.Background(), "ana")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	resp := f.post(t, c, "/admin/users/"+itoa(u.ID)+"/device",
+		url.Values{"csrf": {csrf}, "label": {"Ana's iPhone"}})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	body := html.UnescapeString(readBody(t, resp))
+
+	// Rendered as markup rather than fetched, since the page forbids loading
+	// anything at all.
+	if !strings.Contains(body, "<svg ") {
+		t.Error("no inline QR code on the page")
+	}
+	m := regexp.MustCompile(`nc://login/server:(\S+?)&user:(\S+?)&password:([A-Za-z0-9]+)`).
+		FindStringSubmatch(body)
+	if m == nil {
+		t.Fatalf("no sign-in URL on the page:\n%s", body)
+	}
+	server, username, password := m[1], m[2], m[3]
+	if server != "http://mirage.test" {
+		t.Errorf("server = %q, want the configured external URL", server)
+	}
+	if username != "ana" {
+		t.Errorf("user = %q, want ana", username)
+	}
+
+	// The credential in the code must work, and belong to that account alone.
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	authenticator := auth.NewAuthenticator(f.db, log)
+	got, err := authenticator.Verify(context.Background(), "ana", password)
+	if err != nil {
+		t.Fatalf("the credential in the sign-in code does not authenticate: %v", err)
+	}
+	if got.ID != u.ID {
+		t.Errorf("credential authenticated as %q", got.Username)
+	}
+
+	// It is a separate credential, named so it can be recognised and revoked.
+	tokens, err := f.db.ListAppPasswords(context.Background(), u.ID)
+	if err != nil {
+		t.Fatalf("ListAppPasswords: %v", err)
+	}
+	if len(tokens) != 1 || tokens[0].Name != "Ana's iPhone" {
+		t.Errorf("app passwords = %+v, want one named for the device", tokens)
+	}
+}
+
+// TestDeviceSetupCodeIsNotCached: the page carries a working credential, so it
+// must not sit in a browser cache or an intermediary.
+func TestDeviceSetupCodeIsNotCached(t *testing.T) {
+	f := newFixture(t, false)
+	c, csrf := f.signIn(t)
+	f.post(t, c, "/admin/users", url.Values{
+		"csrf": {csrf}, "username": {"ana"},
+		"home": {filepath.Join(f.homes, "alice")}, "uid": {"1026"}, "gid": {"100"},
+	}).Body.Close()
+	u, _ := f.db.UserByName(context.Background(), "ana")
+
+	resp := f.post(t, c, "/admin/users/"+itoa(u.ID)+"/device", url.Values{"csrf": {csrf}})
+	defer resp.Body.Close()
+	if got := resp.Header.Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
+	if got := resp.Header.Get("Referrer-Policy"); got != "no-referrer" {
+		t.Errorf("Referrer-Policy = %q, want no-referrer", got)
+	}
+}
+
+// TestDeviceSetupRequiresCSRF: minting a credential is exactly the request that
+// must not be triggerable from another site.
+func TestDeviceSetupRequiresCSRF(t *testing.T) {
+	f := newFixture(t, false)
+	c, csrf := f.signIn(t)
+	f.post(t, c, "/admin/users", url.Values{
+		"csrf": {csrf}, "username": {"ana"},
+		"home": {filepath.Join(f.homes, "alice")}, "uid": {"1026"}, "gid": {"100"},
+	}).Body.Close()
+	u, _ := f.db.UserByName(context.Background(), "ana")
+
+	resp := f.post(t, c, "/admin/users/"+itoa(u.ID)+"/device", url.Values{"csrf": {"wrong"}})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", resp.StatusCode)
+	}
+	tokens, _ := f.db.ListAppPasswords(context.Background(), u.ID)
+	if len(tokens) != 0 {
+		t.Error("a credential was minted without a valid form token")
+	}
+}

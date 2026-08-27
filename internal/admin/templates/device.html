@@ -1,0 +1,41 @@
+{{ template "head" . }}
+{{ template "nav" . }}
+<main>
+  <h1>Set up a device for {{ .User.Username }}</h1>
+  <p class="sub">Scan this in the Nextcloud app to sign in. No address or password to type.</p>
+
+  <div class="card" style="text-align:center">
+    <div style="max-width:17rem;margin:0 auto;padding:.75rem;background:#fff;border-radius:12px">
+      {{ .QR }}
+    </div>
+    <p class="hint" style="margin:1rem 0 0">
+      In the Nextcloud app, choose <strong>Log in</strong> and then the
+      QR code button on the sign-in screen.
+    </p>
+  </div>
+
+  <p class="banner warn">
+    This code contains a working credential for <strong>{{ .User.Username }}</strong>.
+    Anyone who photographs it can read and change that account's files. It is
+    shown once and cannot be displayed again &mdash; only its fingerprint is
+    stored. Leaving this page discards it.
+  </p>
+
+  <div class="card">
+    <h2>If the camera will not cooperate</h2>
+    <p class="hint" style="margin-bottom:.6rem">
+      The same thing as text. Some clients accept it pasted; otherwise sign in
+      with the address and the account's own password.
+    </p>
+    <p class="mono" style="word-break:break-all;background:var(--bg);border:1px solid var(--line);
+              border-radius:8px;padding:.7rem;font-size:.8rem;margin:0">{{ .SetupURL }}</p>
+  </div>
+
+  <div class="actions">
+    <a class="button" href="/admin/users/{{ .User.ID }}">Done</a>
+    <form method="post" action="/admin/users/{{ .User.ID }}/device" style="margin:0">
+      <input type="hidden" name="csrf" value="{{ .CSRF }}">
+      <button class="secondary" type="submit">Issue another code</button>
+    </form>
+  </div>
+</main>

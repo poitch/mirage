@@ -92,6 +92,22 @@
       </form>
     </div>
 
+    <hr>
+    <div>
+      <h2>Set up a device</h2>
+      <p class="hint" style="margin-bottom:.6rem">
+        Produces a code to scan in the Nextcloud app, which signs a phone or
+        tablet in without anyone typing an address or a password. Each one is a
+        separate credential, so it can be revoked on its own.
+      </p>
+      <form method="post" action="/admin/users/{{ .User.ID }}/device">
+        <input type="hidden" name="csrf" value="{{ .CSRF }}">
+        <input name="label" placeholder="Which device? e.g. Ana&rsquo;s iPhone"
+               maxlength="64">
+        <button type="submit">Show sign-in code</button>
+      </form>
+    </div>
+
     {{ if not .ReadOnly }}
     <hr>
     <div>

@@ -339,16 +339,19 @@ func (lf *LoginFlow) LegacyPage(w http.ResponseWriter, r *http.Request) {
 	// dismissed by the scheme either way.
 	lf.render(w, "granted.html", http.StatusOK, pageData{
 		Device:  device,
-		Handoff: template.URL(handoffURL(lf.externalURL, user.Username, appPassword)),
+		Handoff: template.URL(HandoffURL(lf.externalURL, user.Username, appPassword)),
 	})
 }
 
-// handoffURL builds the custom-scheme URL that carries credentials to the app.
+// HandoffURL builds the custom-scheme URL that carries credentials to a client.
+//
+// It is what the pairing flow redirects to, and what a sign-in code contains -
+// the same URL either way, so a scan and a redirect deliver the same thing.
 //
 // The values are escaped the way PHP's urlencode does, which is what clients
 // parse: that differs from RFC 3986 in encoding a space as "+" rather than
 // "%20".
-func handoffURL(server, username, password string) string {
+func HandoffURL(server, username, password string) string {
 	return fmt.Sprintf("%s://login/server:%s&user:%s&password:%s",
 		handoffScheme, server, url.QueryEscape(username), url.QueryEscape(password))
 }

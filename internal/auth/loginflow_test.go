@@ -307,7 +307,7 @@ func TestLegacyFlowRejectsBadCredentials(t *testing.T) {
 }
 
 func TestHandoffURLEscaping(t *testing.T) {
-	got := handoffURL("https://mirage.example.com", "first.last@example.com", "abc+def ghi")
+	got := HandoffURL("https://mirage.example.com", "first.last@example.com", "abc+def ghi")
 	// Escaped as PHP's urlencode does, which is what clients parse: a space
 	// becomes "+" rather than "%20".
 	want := "nc://login/server:https://mirage.example.com&user:first.last%40example.com&password:abc%2Bdef+ghi"

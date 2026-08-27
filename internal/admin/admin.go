@@ -50,9 +50,10 @@ type Admin struct {
 	tmpl     *template.Template
 	sessions *sessionStore
 
-	username string
-	password string
-	secure   bool
+	username    string
+	password    string
+	externalURL string
+	secure      bool
 	// readOnly is set when the config file declares the account list, in which
 	// case it is authoritative and this page must not contradict it.
 	readOnly bool
@@ -92,8 +93,9 @@ func New(db *store.DB, storage *fsx.Manager, scanner *index.Scanner, a *auth.Aut
 		db: db, storage: storage, scanner: scanner, auth: a, log: log,
 		tmpl: tmpl, sessions: newSessionStore(),
 		username: username, password: password,
-		secure:   strings.HasPrefix(externalURL, "https://"),
-		readOnly: configManagesUsers,
+		externalURL: strings.TrimRight(externalURL, "/"),
+		secure:      strings.HasPrefix(externalURL, "https://"),
+		readOnly:    configManagesUsers,
 	}, nil
 }
 
@@ -115,6 +117,7 @@ func (ad *Admin) Routes(mux *http.ServeMux) {
 	mux.Handle("POST /admin/users/{id}/state", ad.guard(ad.setState))
 	mux.Handle("POST /admin/users/{id}/delete", ad.guard(ad.deleteUser))
 	mux.Handle("POST /admin/users/{id}/scan", ad.guard(ad.scanUser))
+	mux.Handle("POST /admin/users/{id}/device", ad.guard(ad.setUpDevice))
 }
 
 // guard requires a live session, and a matching CSRF token on writes.
@@ -216,6 +219,10 @@ type pageData struct {
 	// files. Nothing inside a container can discover the host path a mount
 	// came from, so this is shown instead of guessing at one.
 	Mounts []string
+	// QR and SetupURL carry a one-time sign-in code for a new device. Held only
+	// for the render that produced them; the credential cannot be shown again.
+	QR       template.HTML
+	SetupURL string
 }
 
 type userForm struct {
@@ -417,6 +424,50 @@ func (ad *Admin) deleteUser(w http.ResponseWriter, r *http.Request, sess *sessio
 	http.Redirect(w, r,
 		"/admin/users?notice=Account deleted. Its files were left untouched on disk.",
 		http.StatusSeeOther)
+}
+
+// setUpDevice mints a credential for one device and shows it as a code to scan.
+//
+// Typing a server address, an account name and a long password into a phone is
+// the step where setting somebody up actually fails. The clients read exactly
+// the URL the pairing flow redirects to, so the same thing rendered as a code
+// signs a device in with one scan.
+//
+// The credential is its own app password rather than the account's, so it can
+// be revoked alone, and it is shown once: only its hash is kept.
+func (ad *Admin) setUpDevice(w http.ResponseWriter, r *http.Request, sess *session) {
+	u, ok := ad.lookupUser(w, r)
+	if !ok {
+		return
+	}
+
+	appPassword, err := auth.GenerateAppPassword()
+	if err != nil {
+		ad.internalError(w, "generate app password", err)
+		return
+	}
+	label := strings.TrimSpace(r.PostFormValue("label"))
+	if label == "" {
+		label = "Set up from the admin page"
+	}
+	if _, err := ad.db.CreateAppPassword(r.Context(), u.ID, label, auth.HashToken(appPassword)); err != nil {
+		ad.internalError(w, "store app password", err)
+		return
+	}
+
+	setupURL := auth.HandoffURL(ad.externalURL, u.Username, appPassword)
+	code, err := qrSVG(setupURL)
+	if err != nil {
+		ad.internalError(w, "render sign-in code", err)
+		return
+	}
+
+	ad.log.Info("issued a device sign-in code", "user", u.Username, "label", label)
+	probe := fsx.ProbeHome(u.Home, u.UID, u.GID)
+	ad.render(w, "device.html", http.StatusOK, pageData{
+		Title: "Set up a device", CSRF: sess.csrf, User: &u, Probe: &probe,
+		QR: code, SetupURL: setupURL, RunningAsRoot: os.Geteuid() == 0,
+	})
 }
 
 func (ad *Admin) scanUser(w http.ResponseWriter, r *http.Request, sess *session) {
