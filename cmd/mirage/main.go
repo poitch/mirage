@@ -29,6 +29,7 @@ Commands:
   doctor     Check the config and the health of each user's storage
   scan       Rebuild the file index from disk
   ls         Show what is indexed for an account, and what is not
+  status     Report progress of a running scan
   user       Inspect accounts and manage credentials
   version    Print the version
 
@@ -66,6 +67,8 @@ func run() error {
 		return cmdScan(args)
 	case "ls":
 		return cmdLs(args)
+	case "status":
+		return cmdStatus(args)
 	case "user":
 		return cmdUser(args)
 	case "version":

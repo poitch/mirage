@@ -72,9 +72,11 @@ func (s *Scanner) ScanUser(ctx context.Context, user store.User) (Stats, error) 
 	// every client every interval for nothing.
 	before := s.rootETag(ctx, user.ID)
 
-	if _, _, err := s.scanDir(ctx, st, user, fsx.RootPath, 0, stamp, &stats); err != nil {
+	progress := s.newProgress(user.Username)
+	if _, _, err := s.scanDir(ctx, st, user, fsx.RootPath, 0, stamp, &stats, progress); err != nil {
 		return stats, err
 	}
+	progress.flush(ctx, &stats, "", true)
 
 	removed, err := store.SweepUnscanned(ctx, s.db, user.ID, stamp)
 	if err != nil {
@@ -98,10 +100,13 @@ func (s *Scanner) ScanUser(ctx context.Context, user store.User) (Stats, error) 
 // scanDir indexes one directory and everything beneath it, returning the
 // directory's derived ETag and its recursive size.
 func (s *Scanner) scanDir(ctx context.Context, st *fsx.Storage, user store.User,
-	dirPath string, parentID int64, stamp int64, stats *Stats) (etag string, size int64, err error) {
+	dirPath string, parentID int64, stamp int64, stats *Stats, progress *progressReporter) (etag string, size int64, err error) {
 
 	if err := ctx.Err(); err != nil {
 		return "", 0, err
+	}
+	if progress != nil {
+		progress.update(ctx, stats, dirPath)
 	}
 
 	info, err := st.Stat(dirPath)
@@ -167,7 +172,7 @@ func (s *Scanner) scanDir(ctx context.Context, st *fsx.Storage, user store.User,
 		childPath := fsx.Join(dirPath, childName)
 
 		if entry.IsDir() {
-			childETag, childSize, err := s.scanDir(ctx, st, user, childPath, dirID, stamp, stats)
+			childETag, childSize, err := s.scanDir(ctx, st, user, childPath, dirID, stamp, stats, progress)
 			if err != nil {
 				return "", 0, err
 			}
@@ -254,7 +259,7 @@ func (s *Scanner) ScanPath(ctx context.Context, user store.User, target string) 
 	stamp := store.Stamp()
 	var stats Stats
 	if info.IsDir() {
-		if _, _, err := s.scanDir(ctx, st, user, target, parentID, stamp, &stats); err != nil {
+		if _, _, err := s.scanDir(ctx, st, user, target, parentID, stamp, &stats, nil); err != nil {
 			return err
 		}
 		// Scoped sweep: only entries under this subtree, since the rest of the

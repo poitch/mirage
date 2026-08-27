@@ -40,3 +40,21 @@ func (db *DB) InstanceID(ctx context.Context) (string, error) {
 	}
 	return id, nil
 }
+
+// SetSetting stores a server-wide value.
+func (db *DB) SetSetting(ctx context.Context, key, value string) error {
+	_, err := db.ExecContext(ctx, `
+		INSERT INTO settings (key, value) VALUES (?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
+	return err
+}
+
+// Setting reads a server-wide value, returning "" when it is not set.
+func (db *DB) Setting(ctx context.Context, key string) (string, error) {
+	var value string
+	err := db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, key).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return value, err
+}
