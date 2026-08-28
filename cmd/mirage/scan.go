@@ -25,6 +25,10 @@ func cmdScan(args []string) error {
 	quick := fs.Bool("quick", false,
 		"use directory timestamps to find added, removed and renamed files "+
 			"without stat'ing every file; misses edits made in place")
+	workers := fs.Int("workers", 0,
+		"directory timestamps to read at once during a quick pass "+
+			"(0 uses the configured value); the useful setting depends on the "+
+			"storage, so time a pass at a few values to find it")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -42,6 +46,10 @@ func cmdScan(args []string) error {
 	storage := fsx.NewManager(cfg.Storage.FileMode.Perm(), cfg.Storage.DirMode.Perm(), excluder)
 	defer storage.Close()
 	scanner := index.NewScanner(db, storage, log)
+	scanner.SetWorkers(cfg.Storage.ScanWorkers)
+	if *workers > 0 {
+		scanner.SetWorkers(*workers)
+	}
 
 	var users []store.User
 	if *username != "" {

@@ -85,6 +85,19 @@ type Storage struct {
 	// changed directories rather than on whichever come first. Zero derives a
 	// figure from the kernel's own limit.
 	MaxWatches int `yaml:"max_watches"`
+	// ScanWorkers is how many directory timestamps a quick pass reads at once.
+	//
+	// A quick pass is one stat per indexed directory, and on a share too large
+	// for the kernel to keep the metadata cached, each one is a disk seek. Done
+	// one at a time the drive is idle between seeks; issued concurrently they
+	// queue and the drive reorders them, and on an array they spread across
+	// spindles. Measured on a 773k-directory share, this is the difference
+	// between over an hour and a few minutes - which is the difference between
+	// a file dropped over SMB appearing eventually and appearing soon.
+	//
+	// Zero derives a figure. Raising it far beyond the drive's queue depth
+	// stops helping; on a single spinning disk it eventually hurts.
+	ScanWorkers int `yaml:"scan_workers"`
 	// Exclude lists entry names that are not indexed or synced, matched against
 	// the name at any depth using filepath.Match syntax.
 	//
@@ -193,6 +206,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Storage.MaxWatches < 0 {
 		return fmt.Errorf("storage.max_watches must not be negative (use 0 to derive it)")
+	}
+	if c.Storage.ScanWorkers < 0 {
+		return fmt.Errorf("storage.scan_workers must not be negative (use 0 to derive it)")
 	}
 	// Compiled here so a malformed pattern is a startup error rather than
 	// something that silently matches nothing for the life of the server.

@@ -75,6 +75,21 @@ storage:
   # kernel memory, and a share that keeps growing will always outrun it.
   max_watches: 0
 
+  # How many directory timestamps a quick pass reads at once. Zero derives a
+  # figure.
+  #
+  # A quick pass is one stat per indexed directory. On a share too large for the
+  # kernel to keep that metadata cached, each one is a disk seek, and a seek is
+  # spent waiting - so reading them one at a time leaves the drive idle most of
+  # the time. Issued together they queue and the drive reorders them, and on an
+  # array they spread across spindles.
+  #
+  # This is the setting that decides how soon a file dropped over SMB appears on
+  # your clients. Time a pass at a few values to find the right one for your
+  # disks: `mirage scan -quick -workers 32 -v`. Past the storage's queue depth
+  # it stops helping, and on a single spinning disk it eventually hurts.
+  scan_workers: 0
+
   # Entry names never indexed or synced, matched at any depth. filepath.Match
   # syntax, so "*.tmp" works as well as a plain name.
   #

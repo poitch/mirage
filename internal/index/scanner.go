@@ -28,10 +28,17 @@ type Scanner struct {
 	log      *slog.Logger
 	notifier Notifier
 	updater  *Updater
+	// workers caps how many directory timestamps a quick pass reads at once.
+	// Zero derives a figure; see Scanner.scanWorkers.
+	workers int
 }
 
 // SetNotifier attaches a change notifier. Passing nil disables notification.
 func (s *Scanner) SetNotifier(n Notifier) { s.notifier = n }
+
+// SetWorkers sets how many directory timestamps a quick pass reads at once.
+// Zero restores the derived default.
+func (s *Scanner) SetWorkers(n int) { s.workers = max(n, 0) }
 
 // NewScanner builds a Scanner.
 func NewScanner(db *store.DB, storage *fsx.Manager, log *slog.Logger) *Scanner {

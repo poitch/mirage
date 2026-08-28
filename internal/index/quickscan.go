@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/poitch/mirage/internal/fsx"
@@ -54,30 +57,9 @@ func (s *Scanner) QuickScanUser(ctx context.Context, user store.User) (Stats, er
 		return stats, nil
 	}
 
-	changed := make([]string, 0, 16)
-	for dirPath, prev := range indexed {
-		if err := ctx.Err(); err != nil {
-			return stats, err
-		}
-		stats.Dirs++
-
-		info, err := st.Stat(dirPath)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				// Gone. Its parent's timestamp moved when it went, so the
-				// parent is queued too and will prune it; queueing the parent
-				// explicitly covers a filesystem that did not update it.
-				changed = append(changed, parentOfPath(dirPath))
-			}
-			continue
-		}
-		if !info.IsDir() {
-			changed = append(changed, parentOfPath(dirPath))
-			continue
-		}
-		if prev.Changed(info.ModTime()) {
-			changed = append(changed, dirPath)
-		}
+	changed, err := s.statDirs(ctx, st, indexed, &stats)
+	if err != nil {
+		return stats, err
 	}
 
 	changed = dedupe(changed)
@@ -118,16 +100,117 @@ func (s *Scanner) QuickScanUser(ctx context.Context, user store.User) (Stats, er
 	stats.Changed = int64(len(changed))
 
 	stats.Duration = time.Since(start)
+	// The worker count is reported because it is the knob that decides how long
+	// this took, and the useful setting depends on the storage rather than on
+	// anything Mirage can work out for itself.
 	if stats.Changed > 0 {
 		s.log.Info("quick scan complete",
 			"user", user.Username, "directories_checked", stats.Dirs,
-			"directories_changed", stats.Changed, "duration", stats.Duration)
+			"directories_changed", stats.Changed, "workers", s.scanWorkers(),
+			"duration", stats.Duration)
 	} else {
 		s.log.Debug("quick scan complete, nothing changed",
 			"user", user.Username, "directories_checked", stats.Dirs,
-			"duration", stats.Duration)
+			"workers", s.scanWorkers(), "duration", stats.Duration)
 	}
 	return stats, nil
+}
+
+// statDirs reads every indexed directory's timestamp and returns the paths that
+// need a closer look.
+//
+// The reads are issued concurrently. Each one is a disk seek on a share whose
+// metadata does not fit in cache, and a seek is spent waiting rather than
+// working, so a single-threaded pass leaves the drive idle most of the time.
+// Concurrent reads let the drive queue and reorder them, and let an array use
+// more than one spindle. This is the one place in the scanner where goroutines
+// help: the work is waiting on IO, not on the CPU.
+func (s *Scanner) statDirs(ctx context.Context, st *fsx.Storage,
+	indexed map[string]store.DirState, stats *Stats) ([]string, error) {
+
+	workers := min(s.scanWorkers(), len(indexed))
+
+	type job struct {
+		path string
+		prev store.DirState
+	}
+	jobs := make(chan job)
+
+	var (
+		mu      sync.Mutex
+		changed = make([]string, 0, 16)
+	)
+	report := func(dirPath string) {
+		mu.Lock()
+		changed = append(changed, dirPath)
+		mu.Unlock()
+	}
+
+	// Its own context so that one worker's failure, or the caller's
+	// cancellation, stops the others rather than leaving them to finish a pass
+	// whose result is discarded.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	var counted atomic.Int64
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range jobs {
+				counted.Add(1)
+				info, err := st.Stat(j.path)
+				switch {
+				case errors.Is(err, os.ErrNotExist):
+					// Gone. Its parent's timestamp moved when it went, so the
+					// parent is queued too and will prune it; queueing the
+					// parent explicitly covers a filesystem that did not
+					// update it.
+					report(parentOfPath(j.path))
+				case err != nil:
+					// Unreadable now; the full rescan settles it.
+				case !info.IsDir():
+					report(parentOfPath(j.path))
+				case j.prev.Changed(info.ModTime()):
+					report(j.path)
+				}
+			}
+		}()
+	}
+
+	var feedErr error
+feed:
+	for dirPath, prev := range indexed {
+		select {
+		case jobs <- job{path: dirPath, prev: prev}:
+		case <-ctx.Done():
+			feedErr = ctx.Err()
+			break feed
+		}
+	}
+	close(jobs)
+	wg.Wait()
+
+	stats.Dirs += counted.Load()
+	if feedErr != nil {
+		return nil, feedErr
+	}
+	return changed, nil
+}
+
+// scanWorkers is how many directory timestamps to read at once.
+//
+// The default is deliberately well above the core count: these goroutines are
+// blocked on the disk, not computing, so the useful number tracks how many
+// requests the storage will accept at once rather than how many CPUs there are.
+// It is capped so that a machine reporting a large core count does not queue
+// thousands of seeks, which on a single spinning disk makes things worse.
+func (s *Scanner) scanWorkers() int {
+	if s.workers > 0 {
+		return s.workers
+	}
+	return min(max(4*runtime.NumCPU(), 16), 64)
 }
 
 // refreshDirectory re-reads one directory's own entries, without descending

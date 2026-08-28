@@ -2,6 +2,8 @@ package index
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -886,5 +888,105 @@ func TestQuickScanKeepsIDsOnDirectoryRename(t *testing.T) {
 	}
 	if file.ID != fileBefore {
 		t.Errorf("file id changed: %d then %d", fileBefore, file.ID)
+	}
+}
+
+// TestQuickScanParallelStatsFindEveryChange checks the concurrent pass across a
+// tree wide enough that the work is spread over several workers, and with more
+// than one directory changed at once.
+//
+// The serial version could not lose a change; the parallel one could, by
+// dropping a result on a full channel or by racing on the shared list.
+func TestQuickScanParallelStatsFindEveryChange(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+
+	const dirs = 200
+	for i := range dirs {
+		mustMkdirAll(t, filepath.Join(f.home, fmt.Sprintf("d%03d", i)))
+		mustWrite(t, filepath.Join(f.home, fmt.Sprintf("d%03d", i), "a.txt"), "a")
+	}
+	f.scan(t)
+
+	// Changes spread across the tree, so a worker that quietly stopped early
+	// would leave some of them unfound.
+	changedDirs := []int{0, 17, 63, 128, 199}
+	for _, i := range changedDirs {
+		mustWrite(t, filepath.Join(f.home, fmt.Sprintf("d%03d", i), "new.txt"), "new")
+	}
+
+	stats, err := f.scanner.QuickScanUser(ctx, f.user)
+	if err != nil {
+		t.Fatalf("QuickScanUser: %v", err)
+	}
+	for _, i := range changedDirs {
+		p := fmt.Sprintf("d%03d/new.txt", i)
+		if _, err := store.NodeByPath(ctx, f.db, f.user.ID, p); err != nil {
+			t.Errorf("the parallel pass missed %s: %v", p, err)
+		}
+	}
+	if stats.Dirs < dirs {
+		t.Errorf("Dirs = %d, want at least %d: some directories were never checked", stats.Dirs, dirs)
+	}
+	if stats.Changed != int64(len(changedDirs)) {
+		t.Errorf("Changed = %d, want %d", stats.Changed, len(changedDirs))
+	}
+}
+
+// TestQuickScanWorkerCountDoesNotAffectTheResult: the worker count is a
+// performance knob, and a pass must reach the same index whatever it is set to.
+func TestQuickScanWorkerCountDoesNotAffectTheResult(t *testing.T) {
+	ctx := context.Background()
+	for _, workers := range []int{1, 2, 8, 64} {
+		f := newFixture(t)
+		f.scanner.SetWorkers(workers)
+		for i := range 20 {
+			mustMkdirAll(t, filepath.Join(f.home, fmt.Sprintf("d%02d", i)))
+			mustWrite(t, filepath.Join(f.home, fmt.Sprintf("d%02d", i), "a.txt"), "a")
+		}
+		f.scan(t)
+
+		mustWrite(t, filepath.Join(f.home, "d07", "added.txt"), "added")
+		if err := os.Remove(filepath.Join(f.home, "d13", "a.txt")); err != nil {
+			t.Fatalf("remove: %v", err)
+		}
+		before := f.node(t, "top.txt").ID
+		if err := os.Rename(filepath.Join(f.home, "top.txt"),
+			filepath.Join(f.home, "moved.txt")); err != nil {
+			t.Fatalf("rename: %v", err)
+		}
+
+		if _, err := f.scanner.QuickScanUser(ctx, f.user); err != nil {
+			t.Fatalf("workers=%d: QuickScanUser: %v", workers, err)
+		}
+		if _, err := store.NodeByPath(ctx, f.db, f.user.ID, "d07/added.txt"); err != nil {
+			t.Errorf("workers=%d: missed the added file: %v", workers, err)
+		}
+		if _, err := store.NodeByPath(ctx, f.db, f.user.ID, "d13/a.txt"); err == nil {
+			t.Errorf("workers=%d: missed the deletion", workers)
+		}
+		after, err := store.NodeByPath(ctx, f.db, f.user.ID, "moved.txt")
+		if err != nil {
+			t.Errorf("workers=%d: missed the rename: %v", workers, err)
+		} else if after.ID != before {
+			t.Errorf("workers=%d: the rename lost the file's ID", workers)
+		}
+	}
+}
+
+// TestQuickScanStopsOnCancellation: a pass over a large share runs for a while,
+// and shutdown must not wait for it. Workers have to notice too, not just the
+// loop feeding them.
+func TestQuickScanStopsOnCancellation(t *testing.T) {
+	f := newFixture(t)
+	for i := range 300 {
+		mustMkdirAll(t, filepath.Join(f.home, fmt.Sprintf("d%03d", i)))
+	}
+	f.scan(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := f.scanner.QuickScanUser(ctx, f.user); !errors.Is(err, context.Canceled) {
+		t.Errorf("QuickScanUser on a cancelled context = %v, want context.Canceled", err)
 	}
 }

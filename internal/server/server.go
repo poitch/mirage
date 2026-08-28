@@ -54,6 +54,7 @@ func New(ctx context.Context, cfg *config.Config, db *store.DB, log *slog.Logger
 	excluder, _ := fsx.NewExcluder(cfg.Storage.Exclude)
 	storage := fsx.NewManager(cfg.Storage.FileMode.Perm(), cfg.Storage.DirMode.Perm(), excluder)
 	scanner := index.NewScanner(db, storage, log)
+	scanner.SetWorkers(cfg.Storage.ScanWorkers)
 	updater := index.NewUpdater(db)
 	updater.SetStorage(storage)
 	watcher := index.NewWatcher(db, storage, scanner, updater, log, cfg.Storage.MaxWatches)
