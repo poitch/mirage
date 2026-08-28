@@ -78,6 +78,13 @@ type Storage struct {
 	// minutes on a share too large to walk in full at that frequency, and too
 	// large for the kernel to watch every directory of. Zero disables it.
 	QuickRescanInterval Duration `yaml:"quick_rescan_interval"`
+	// MaxWatches caps how many directories the filesystem watcher may watch.
+	//
+	// Watches are a fixed kernel resource and a large share has far more
+	// directories than any limit allows, so they are spent on the most recently
+	// changed directories rather than on whichever come first. Zero derives a
+	// figure from the kernel's own limit.
+	MaxWatches int `yaml:"max_watches"`
 	// Exclude lists entry names that are not indexed or synced, matched against
 	// the name at any depth using filepath.Match syntax.
 	//
@@ -183,6 +190,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Storage.QuickRescanInterval < 0 {
 		return fmt.Errorf("storage.quick_rescan_interval must not be negative")
+	}
+	if c.Storage.MaxWatches < 0 {
+		return fmt.Errorf("storage.max_watches must not be negative (use 0 to derive it)")
 	}
 	// Compiled here so a malformed pattern is a startup error rather than
 	// something that silently matches nothing for the life of the server.

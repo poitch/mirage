@@ -57,12 +57,23 @@ storage:
   quick_rescan_interval: 5m
 
   # Watch the filesystem for changes as they happen, which is faster than any
-  # scan. Each directory needs a kernel watch, and the limit is low by default:
-  # a share with hundreds of thousands of directories will exhaust it, and the
-  # startup log says so along with the number to raise it to. On Synology,
-  # `sysctl -w fs.inotify.max_user_watches=1048576`, made permanent as a
-  # boot-up task in DSM's Task Scheduler.
+  # scan.
+  #
+  # Each directory needs its own kernel watch, and the default allowance is a
+  # few thousand against a large share's hundreds of thousands of directories.
+  # Rather than try to cover the tree, Mirage spends the watches it can have on
+  # the directories that changed most recently - the ones in daily use - and
+  # leaves the archives to the periodic passes. So a change in a folder somebody
+  # actually uses shows up in about a second, and one in a folder untouched for
+  # years waits for the next pass.
   watcher: true
+
+  # How many directories may be watched. Zero takes a share of what the kernel
+  # allows. Raising the kernel's own limit lets more of the tree be watched -
+  # on Synology, `sysctl -w fs.inotify.max_user_watches=1048576`, made
+  # permanent as a boot-up task in DSM's Task Scheduler - but each watch costs
+  # kernel memory, and a share that keeps growing will always outrun it.
+  max_watches: 0
 
   # Entry names never indexed or synced, matched at any depth. filepath.Match
   # syntax, so "*.tmp" works as well as a plain name.

@@ -444,6 +444,39 @@ func (d DirState) Changed(onDisk time.Time) bool {
 	return d.MTime.Nanosecond() != onDisk.Nanosecond()
 }
 
+// RecentDirs returns a user's most recently modified directories, newest first.
+//
+// Filesystem watches are a scarce, fixed resource: the kernel's default allows
+// a few thousand, while a large share has hundreds of thousands of directories.
+// Spending them on whichever directories a tree walk happened to reach first
+// wastes them on archives that have not changed in years. The index already
+// knows when each directory last changed, so the ones worth watching can simply
+// be asked for.
+func RecentDirs(ctx context.Context, q Querier, userID int64, limit int) ([]string, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := q.QueryContext(ctx, `
+		SELECT path FROM nodes
+		WHERE user_id = ? AND is_dir = 1
+		ORDER BY mtime DESC
+		LIMIT ?`, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return nil, err
+		}
+		out = append(out, path)
+	}
+	return out, rows.Err()
+}
+
 // IndexedDirs returns every indexed directory for a user, keyed by path.
 //
 // Fetched in one query so that a quick pass can walk the whole tree comparing
@@ -471,4 +504,12 @@ func IndexedDirs(ctx context.Context, q Querier, userID int64) (map[string]DirSt
 		out[path] = d
 	}
 	return out, rows.Err()
+}
+
+// CountDirs returns how many directories are indexed for a user.
+func CountDirs(ctx context.Context, q Querier, userID int64) (int64, error) {
+	var n int64
+	err := q.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM nodes WHERE user_id = ? AND is_dir = 1`, userID).Scan(&n)
+	return n, err
 }

@@ -56,7 +56,7 @@ func New(ctx context.Context, cfg *config.Config, db *store.DB, log *slog.Logger
 	scanner := index.NewScanner(db, storage, log)
 	updater := index.NewUpdater(db)
 	updater.SetStorage(storage)
-	watcher := index.NewWatcher(db, storage, scanner, updater, log)
+	watcher := index.NewWatcher(db, storage, scanner, updater, log, cfg.Storage.MaxWatches)
 
 	// Changes reach connected clients in about a second instead of waiting for
 	// the poll interval. Both the write path and the scanner report through it,

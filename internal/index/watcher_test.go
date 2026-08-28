@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,7 +20,7 @@ import (
 func (f *fixture) startWatcher(t *testing.T) {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	w := NewWatcher(f.db, f.scanner.storage, f.scanner, NewUpdater(f.db), log)
+	w := NewWatcher(f.db, f.scanner.storage, f.scanner, NewUpdater(f.db), log, 0)
 	w.debounce = 20 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -179,5 +181,94 @@ func TestWatcherIgnoresInternalPaths(t *testing.T) {
 	}
 	if f.rootETag() != rootBefore {
 		t.Error("an in-flight chunk changed the root ETag, which would wake every client")
+	}
+}
+
+// TestWatcherSpendsItsBudgetOnRecentDirectories is the point of the change. The
+// kernel allows a few thousand watches by default while a large share has
+// hundreds of thousands of directories, so which ones get watched decides
+// whether the watcher is useful or decorative. Walking the tree spends them on
+// whichever directories sort first, which on an archive is exactly the ones
+// that never change.
+func TestWatcherSpendsItsBudgetOnRecentDirectories(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+
+	// A tree shaped like an archive: many directories that have not changed in
+	// years, and two that are in daily use. The archive sorts first by name,
+	// which is what a tree walk would spend the budget on.
+	for i := range 20 {
+		dir := filepath.Join(f.home, "01.Archive", "old"+strconv.Itoa(i))
+		mustMkdirAll(t, dir)
+		mustWrite(t, filepath.Join(dir, "f.txt"), "old")
+	}
+	for _, name := range []string{"zz.Downloads", "zz.Documents"} {
+		dir := filepath.Join(f.home, name)
+		mustMkdirAll(t, dir)
+		mustWrite(t, filepath.Join(dir, "f.txt"), "recent")
+	}
+
+	// Age everything, then bring only the two live directories up to date, so
+	// the ordering is unambiguous rather than a tie broken arbitrarily.
+	old := time.Now().Add(-5 * 365 * 24 * time.Hour)
+	if err := filepath.WalkDir(f.home, func(p string, d os.DirEntry, err error) error {
+		if err != nil || !d.IsDir() {
+			return nil //nolint:nilerr // best effort
+		}
+		return os.Chtimes(p, old, old)
+	}); err != nil {
+		t.Fatalf("age the tree: %v", err)
+	}
+	now := time.Now()
+	for _, name := range []string{"zz.Downloads", "zz.Documents"} {
+		if err := os.Chtimes(filepath.Join(f.home, name), now, now); err != nil {
+			t.Fatalf("chtimes: %v", err)
+		}
+	}
+	f.scan(t)
+
+	// A budget far smaller than the number of directories, as on a real share.
+	const budget = 2
+	dirs, err := store.RecentDirs(ctx, f.db, f.user.ID, budget)
+	if err != nil {
+		t.Fatalf("RecentDirs: %v", err)
+	}
+	if len(dirs) != budget {
+		t.Fatalf("got %d directories, want %d", len(dirs), budget)
+	}
+
+	chosen := strings.Join(dirs, " ")
+	for _, want := range []string{"zz.Downloads", "zz.Documents"} {
+		if !strings.Contains(chosen, want) {
+			t.Errorf("a live directory was not chosen; got %v", dirs)
+		}
+	}
+	// And not squandered on the archive, which sorts first by name and would
+	// have taken the whole budget under a tree walk.
+	for _, d := range dirs {
+		if strings.Contains(d, "01.Archive/old") {
+			t.Errorf("the budget was spent on an archive directory: %q", d)
+		}
+	}
+}
+
+// TestWatchBudgetIsBounded: the budget must not grow with the share, or it
+// becomes the inotify limit chase all over again.
+func TestWatchBudgetIsBounded(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	configured := NewWatcher(nil, nil, nil, nil, log, 512)
+	if got := configured.watchBudget(); got != 512 {
+		t.Errorf("budget = %d, want the configured 512", got)
+	}
+
+	derived := NewWatcher(nil, nil, nil, nil, log, 0)
+	got := derived.watchBudget()
+	if got <= 0 {
+		t.Fatalf("derived budget = %d, want a positive figure", got)
+	}
+	// Whatever the kernel allows, only part of it is taken: the rest of the
+	// machine needs watches too.
+	if limit := inotifyLimit(); limit > 0 && got >= limit {
+		t.Errorf("derived budget %d takes the whole kernel limit of %d", got, limit)
 	}
 }

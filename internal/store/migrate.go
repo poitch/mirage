@@ -158,6 +158,14 @@ ALTER TABLE nodes ADD COLUMN complete INTEGER NOT NULL DEFAULT 0;
 	`
 ALTER TABLE nodes ADD COLUMN mtime_nsec INTEGER NOT NULL DEFAULT 0;
 `,
+	// 6: find the most recently changed directories cheaply.
+	//
+	// The kernel allows only so many filesystem watches, far fewer than a large
+	// share has directories, so they have to be spent on the directories most
+	// likely to change rather than on whichever the tree walk reached first.
+	`
+CREATE INDEX idx_nodes_dir_mtime ON nodes(user_id, is_dir, mtime DESC);
+`,
 }
 
 // migrate applies any migrations the database has not yet seen.

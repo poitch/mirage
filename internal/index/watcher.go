@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -39,7 +40,9 @@ type Watcher struct {
 	updater *Updater
 	log     *slog.Logger
 
-	debounce time.Duration
+	// maxWatches caps how many directories are watched. Zero derives it.
+	maxWatches int
+	debounce   time.Duration
 
 	mu sync.Mutex
 	// homes maps each watched user's home directory to their account, so an
@@ -48,11 +51,13 @@ type Watcher struct {
 }
 
 // NewWatcher builds a Watcher.
-func NewWatcher(db *store.DB, storage *fsx.Manager, scanner *Scanner, updater *Updater, log *slog.Logger) *Watcher {
+func NewWatcher(db *store.DB, storage *fsx.Manager, scanner *Scanner, updater *Updater,
+	log *slog.Logger, maxWatches int) *Watcher {
 	return &Watcher{
 		db: db, storage: storage, scanner: scanner, updater: updater, log: log,
-		debounce: defaultDebounce,
-		homes:    make(map[string]store.User),
+		maxWatches: maxWatches,
+		debounce:   defaultDebounce,
+		homes:      make(map[string]store.User),
 	}
 }
 
@@ -69,7 +74,9 @@ func (w *Watcher) Run(ctx context.Context) error {
 		return fmt.Errorf("list users: %w", err)
 	}
 
-	var watched, wanted int
+	budget := w.watchBudget()
+	var watched, total int
+
 	for _, u := range users {
 		if u.Disabled {
 			continue
@@ -83,9 +90,17 @@ func (w *Watcher) Run(ctx context.Context) error {
 		w.homes[home] = u
 		w.mu.Unlock()
 
-		n, seen, err := w.watchTree(fsw, home)
+		dirs, err := store.CountDirs(ctx, w.db, u.ID)
+		if err != nil {
+			w.log.Warn("could not count directories", "user", u.Username, "error", err)
+		}
+		total += int(dirs)
+
+		// Divided between accounts rather than given to whoever is scanned
+		// first, so one large share does not leave another with nothing.
+		share := budget / max(1, len(users))
+		n, err := w.watchRecent(ctx, fsw, u, home, share)
 		watched += n
-		wanted += seen
 		if err != nil {
 			w.reportWatchFailure(u, err)
 		}
@@ -95,21 +110,93 @@ func (w *Watcher) Run(ctx context.Context) error {
 	case watched == 0:
 		w.log.Warn("no directories are being watched; changes made outside Mirage " +
 			"will only be seen by the periodic rescan")
-	case watched < wanted:
-		// Partial coverage is the dangerous middle: changes are picked up
-		// promptly in some parts of the tree and not at all in others, which
-		// looks like intermittent failure rather than a limit being hit.
-		w.log.Warn("watching only part of the tree; changes in the rest will wait "+
-			"for the periodic rescan",
-			"watched", watched, "directories", wanted,
-			"limit", inotifyLimit(),
-			"hint", fmt.Sprintf("raise fs.inotify.max_user_watches to at least %d, "+
-				"or exclude costly directories with storage.exclude", wanted+wanted/10))
+	case total > watched:
+		// Partial coverage is stated plainly, along with what it means, because
+		// the alternative is changes appearing promptly in one part of the tree
+		// and not at all in another, which reads as intermittent failure.
+		w.log.Info("watching the most recently changed directories; the rest are "+
+			"covered by the periodic passes",
+			"watched", watched, "directories", total,
+			"kernel_limit", inotifyLimit(),
+			"note", "watches are a fixed kernel resource, so they are spent where "+
+				"changes actually happen rather than on archives")
 	default:
 		w.log.Info("watching for changes", "directories", watched, "users", len(w.homes))
 	}
 
 	return w.consume(ctx, fsw)
+}
+
+// watchBudget is how many directories may be watched in total.
+//
+// Derived from the kernel's own limit when not configured, leaving most of it
+// for everything else on the machine. The default limit is a few thousand,
+// which on a large share is a rounding error against the number of directories
+// - so the point is not to cover the tree but to spend a small budget well.
+func (w *Watcher) watchBudget() int {
+	if w.maxWatches > 0 {
+		return w.maxWatches
+	}
+	limit := inotifyLimit()
+	if limit <= 0 {
+		return defaultWatchBudget
+	}
+	if budget := limit / 2; budget > 0 {
+		return budget
+	}
+	return defaultWatchBudget
+}
+
+// defaultWatchBudget is used where the kernel limit cannot be read.
+const defaultWatchBudget = 4096
+
+// watchRecent watches a user's most recently changed directories.
+//
+// Deliberately not a tree walk. Walking a share of three-quarters of a million
+// directories to add a few thousand watches costs many minutes of disk and
+// spends the budget on whichever directories sort first - which on an archive
+// is precisely the ones that never change. The index already records when each
+// directory last changed, so the ones worth watching can be asked for directly.
+func (w *Watcher) watchRecent(ctx context.Context, fsw *fsnotify.Watcher,
+	u store.User, home string, budget int) (int, error) {
+
+	dirs, err := store.RecentDirs(ctx, w.db, u.ID, budget)
+	if err != nil {
+		return 0, err
+	}
+	if len(dirs) == 0 {
+		// No index yet, so there is nothing to choose from. The first scan
+		// builds one and the next start can be selective.
+		return 0, nil
+	}
+
+	var added int
+	var firstErr error
+	for _, rel := range dirs {
+		path := home
+		if !fsx.IsRoot(rel) {
+			path = filepath.Join(home, filepath.FromSlash(rel))
+		}
+		if err := fsw.Add(path); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			// Out of watches: nothing further will succeed either, so stop
+			// rather than failing once per remaining directory.
+			if isWatchLimit(err) {
+				break
+			}
+			continue
+		}
+		added++
+	}
+	return added, firstErr
+}
+
+// isWatchLimit reports whether an error means the kernel is out of watches.
+func isWatchLimit(err error) bool {
+	return errors.Is(err, syscall.ENOSPC) ||
+		strings.Contains(err.Error(), "no space left on device")
 }
 
 // watchTree adds a watch to dir and every directory beneath it, returning how
@@ -172,11 +259,12 @@ func (w *Watcher) reportWatchFailure(u store.User, err error) {
 		w.log.Warn("cannot watch home: it does not exist", "user", u.Username, "home", u.Home)
 		return
 	}
-	if strings.Contains(err.Error(), "no space left on device") || errors.Is(err, fsnotify.ErrEventOverflow) {
-		w.log.Warn("ran out of filesystem watches; the rest of this tree will only be "+
-			"picked up by the periodic rescan",
-			"user", u.Username,
-			"hint", "raise fs.inotify.max_user_watches on the host, or lower storage.rescan_interval")
+	if isWatchLimit(err) || errors.Is(err, fsnotify.ErrEventOverflow) {
+		w.log.Info("the kernel would allow no more watches; the rest of this tree is "+
+			"covered by the periodic passes",
+			"user", u.Username, "kernel_limit", inotifyLimit(),
+			"hint", "raise fs.inotify.max_user_watches to watch more of it, "+
+				"or set storage.max_watches to choose the budget explicitly")
 		return
 	}
 	w.log.Warn("could not watch part of this tree; the periodic rescan still covers it",
