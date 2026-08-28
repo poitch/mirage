@@ -7,13 +7,15 @@ import (
 	"strings"
 )
 
-// filesPage explains where a file is, for the one case that reaches it.
+// filesPage explains where a file is, for the cases that reach it.
 //
 // The desktop client turns a search result into "open this folder in the file
-// manager" and only opens a browser when it cannot find the folder among the
-// ones it is syncing - which means the person has that folder deselected on
-// this device. So this page exists to answer the question they are actually
-// asking, which is "then where is it?", rather than to be a file manager.
+// manager" and only opens a browser when it cannot match the folder to one it
+// is syncing. That happens when the folder is deselected - and always on macOS
+// under the File Provider integration, because the client refuses to register
+// classic sync folders in that mode and the lookup has nothing to search. So
+// this page answers the question the person is actually left with, which is
+// "then where is it?", rather than trying to be a file manager.
 //
 // It is served without authentication, and deliberately shows nothing it was
 // not given: the path is read out of the query string the caller supplied, and
@@ -50,9 +52,10 @@ var filesPage = template.Must(template.New("files").Parse(`<!doctype html>
   <p>Mirage has no web interface, so there is nothing to open here. The file is at:</p>
   <div class="path">{{ .Dir }}{{ if ne .Dir "/" }}/{{ end }}<span class="name">{{ .Name }}</span></div>
   <p>
-    Your client sent you here because it could not find that folder among the ones it
-    is syncing on this device &mdash; most likely it is deselected. Turn it on in the
-    client&rsquo;s folder settings, or open the file on a device that syncs it.
+    Open it from the Nextcloud entry in your file manager. Your client came here because
+    it could not match this to a folder it syncs on this device &mdash; either that folder
+    is deselected, or, on macOS, the File Provider integration is in use: the client only
+    knows how to reveal a search result inside a classic sync folder.
   </p>
 {{ else }}
   <h1>Mirage</h1>
