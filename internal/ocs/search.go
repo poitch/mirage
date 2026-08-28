@@ -3,6 +3,7 @@ package ocs
 import (
 	"errors"
 	"net/http"
+	"net/url"
 	"path"
 	"strconv"
 	"strings"
@@ -141,11 +142,9 @@ func (s *Service) Search(v Version) http.HandlerFunc {
 func (s *Service) searchEntryFor(user store.User, n store.Node) searchEntry {
 	// The folder the match sits in, which is what tells two files of the same
 	// name apart in a list.
-	subline := path.Dir(n.Path)
-	if subline == "." || subline == "/" {
-		subline = "/"
-	} else {
-		subline = "/" + subline
+	dir := "/" + path.Dir(n.Path)
+	if p := path.Dir(n.Path); p == "." || p == "/" {
+		dir = "/"
 	}
 
 	icon := "icon-file"
@@ -155,8 +154,8 @@ func (s *Service) searchEntryFor(user store.User, n store.Node) searchEntry {
 
 	return searchEntry{
 		Title:       n.Name,
-		Subline:     subline,
-		ResourceURL: s.externalURL + FilePath(n.ID),
+		Subline:     dir,
+		ResourceURL: s.externalURL + revealPath(dir, n.Name),
 		Icon:        icon,
 		Attributes: map[string]string{
 			"fileId": strconv.FormatInt(n.ID, 10),
@@ -165,11 +164,20 @@ func (s *Service) searchEntryFor(user store.User, n store.Node) searchEntry {
 	}
 }
 
-// FilePath is the address of a file by its id, which is what a search result
-// links to. Nextcloud opens it in the web interface; Mirage has none, so it
-// redirects to the file itself.
-func FilePath(fileID int64) string {
-	return "/index.php/f/" + strconv.FormatInt(fileID, 10)
+// FilesAppPath is the address a search result points at.
+const FilesAppPath = "/index.php/apps/files/"
+
+// revealPath builds the link the desktop client turns into "show me this file".
+//
+// The client does not follow this URL when it can avoid it. It reads dir and
+// scrollto out of the query, looks the folder up among the ones it is syncing,
+// and opens that in the file manager instead - but only when both parameters
+// are present, and only for a provider whose id contains "file". Without them
+// it silently falls back to opening a browser, which is not what somebody
+// clicking a search result in a desktop app is asking for.
+func revealPath(dir, name string) string {
+	q := url.Values{"dir": {dir}, "scrollto": {name}}
+	return FilesAppPath + "?" + q.Encode()
 }
 
 // OpenFile resolves /index.php/f/{fileid} to the file it names.

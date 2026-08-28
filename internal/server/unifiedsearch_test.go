@@ -98,6 +98,78 @@ func TestUnifiedSearchFindsFiles(t *testing.T) {
 	if e.Attributes["fileId"] == "" {
 		t.Error("no fileId; the client matches results against its journal by id")
 	}
+
+	// The desktop client only reveals a result in the file manager when the URL
+	// carries dir and scrollto; without them it silently opens a browser
+	// instead, which is not what clicking a search result should do.
+	u, err := url.Parse(e.ResourceURL)
+	if err != nil {
+		t.Fatalf("resourceUrl %q: %v", e.ResourceURL, err)
+	}
+	if got := u.Query().Get("dir"); got != "/docs/nested" {
+		t.Errorf("dir = %q, want /docs/nested", got)
+	}
+	if got := u.Query().Get("scrollto"); got != "deep.txt" {
+		t.Errorf("scrollto = %q, want deep.txt", got)
+	}
+}
+
+// TestSearchResultAtTheRootIsRevealable: dir must be non-empty even at the top
+// of the account, or the client falls back to the browser.
+func TestSearchResultAtTheRootIsRevealable(t *testing.T) {
+	h := newHarness(t)
+	got := h.unified(t, "hello", nil)
+	if len(got.OCS.Data.Entries) != 1 {
+		t.Fatalf("entries = %+v, want hello.txt", got.OCS.Data.Entries)
+	}
+	u, err := url.Parse(got.OCS.Data.Entries[0].ResourceURL)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if dir := u.Query().Get("dir"); dir != "/" {
+		t.Errorf("dir = %q for a file at the root, want /", dir)
+	}
+	if got := u.Query().Get("scrollto"); got != "hello.txt" {
+		t.Errorf("scrollto = %q", got)
+	}
+}
+
+// TestFilesPageExplainsWhereTheFileIs covers the fallback: the client opens a
+// browser here only when the folder is not synced on the device.
+func TestFilesPageExplainsWhereTheFileIs(t *testing.T) {
+	h := newHarness(t)
+
+	// Reached without credentials, because a browser opened from the client
+	// carries none and this shows only what the URL already contained.
+	resp := h.do("GET", "/index.php/apps/files/?dir=%2Fdocs%2Fnested&scrollto=deep.txt", "", "", "", nil)
+	body := readBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if !strings.Contains(body, "/docs/nested") || !strings.Contains(body, "deep.txt") {
+		t.Errorf("the page does not say where the file is:\n%s", body)
+	}
+
+	// Hand-edited or bare, it still renders rather than erroring.
+	plain := h.do("GET", "/index.php/apps/files/", "", "", "", nil)
+	plainBody := readBody(t, plain)
+	if plain.StatusCode != http.StatusOK {
+		t.Errorf("bare page status = %d, want 200", plain.StatusCode)
+	}
+	if !strings.Contains(plainBody, "no web interface") {
+		t.Errorf("the bare page does not explain itself:\n%s", plainBody)
+	}
+}
+
+// TestFilesPageEscapesWhatItIsGiven: the page reflects the query string, so a
+// name carrying markup must not become markup.
+func TestFilesPageEscapesWhatItIsGiven(t *testing.T) {
+	h := newHarness(t)
+	q := url.Values{"dir": {"/docs"}, "scrollto": {`<script>alert(1)</script>`}}
+	body := readBody(t, h.do("GET", "/index.php/apps/files/?"+q.Encode(), "", "", "", nil))
+	if strings.Contains(body, "<script>alert") {
+		t.Errorf("the page reflected markup unescaped:\n%s", body)
+	}
 }
 
 // TestUnifiedSearchTreatsTheTermAsText: somebody typing a percent sign means

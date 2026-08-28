@@ -197,8 +197,12 @@ func (s *Server) routes() http.Handler {
 		mux.Handle("GET "+v.prefix+"/search/providers/{providerId}/search",
 			protected(s.ocs.Search(v.version)))
 	}
-	// Where a search result points. Nextcloud opens these in its web interface;
-	// Mirage redirects to the file itself.
+	// Where a search result points. The desktop client reads the folder out of
+	// this URL and opens it in the file manager without ever fetching it; the
+	// page is only reached when that folder is not synced on the device, so it
+	// explains where the file is rather than pretending to be a file manager.
+	// Unauthenticated: it shows only what the caller put in the query string.
+	mux.HandleFunc("GET "+ocs.FilesAppPath, s.ocs.FilesPage)
 	mux.Handle("GET /index.php/f/{fileid}", protected(http.HandlerFunc(s.ocs.OpenFile)))
 
 	// notify_push. The websocket is not behind the Basic auth middleware: the
