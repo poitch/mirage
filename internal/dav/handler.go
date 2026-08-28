@@ -53,6 +53,17 @@ func (h *Handler) allowedMethods() string {
 	return "OPTIONS, HEAD, GET, PUT, DELETE, MKCOL, COPY, MOVE, PROPFIND, PROPPATCH"
 }
 
+// ServeSearch answers a WebDAV SEARCH, which clients send to the DAV root
+// rather than to a collection.
+func (h *Handler) ServeSearch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "SEARCH" {
+		w.Header().Set("Allow", "SEARCH")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	h.handleSearch(w, r)
+}
+
 // ServeHTTP dispatches a request to /remote.php/dav/files/{user}/..., where
 // the account is named in the path.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {

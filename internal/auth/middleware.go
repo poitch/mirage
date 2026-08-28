@@ -44,6 +44,15 @@ func (a *Authenticator) Require(next http.Handler) http.Handler {
 		user, err := a.Verify(r.Context(), username, secret)
 		if err != nil {
 			if !errors.Is(err, ErrUnauthorized) {
+				// A client hanging up mid-request cancels the context and the
+				// credential lookup fails with it. That is the client's doing,
+				// not a fault here, and reporting it as an error buried the
+				// real ones. There is nobody left to answer either.
+				if errors.Is(err, context.Canceled) || errors.Is(r.Context().Err(), context.Canceled) {
+					a.log.Debug("client disconnected before authentication finished",
+						"user", username, "path", r.URL.Path)
+					return
+				}
 				a.log.Error("authentication failed", "error", err, "path", r.URL.Path)
 				http.Error(w, "internal error", http.StatusInternalServerError)
 				return

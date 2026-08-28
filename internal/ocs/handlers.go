@@ -268,27 +268,12 @@ func (s *Service) User(v Version) http.HandlerFunc {
 			used = 0
 		}
 
-		q := quota{Used: used, Quota: quotaUnlimited, Total: quotaUnlimited, Free: quotaUnlimited}
-		if u.Quota > 0 {
-			free := u.Quota - used
-			if free < 0 {
-				free = 0
-			}
-			q = quota{
-				Free:     free,
-				Used:     used,
-				Total:    u.Quota,
-				Quota:    u.Quota,
-				Relative: float64(used) / float64(u.Quota) * 100,
-			}
-		}
-
 		Write(w, r, v, userData{
 			ID:             u.Username,
 			DisplayName:    u.DisplayName,
 			DisplayNameAlt: u.DisplayName,
 			Enabled:        !u.Disabled,
-			Quota:          q,
+			Quota:          accountQuota(u, used),
 		})
 	}
 }

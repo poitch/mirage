@@ -513,3 +513,41 @@ func CountDirs(ctx context.Context, q Querier, userID int64) (int64, error) {
 		`SELECT COUNT(*) FROM nodes WHERE user_id = ? AND is_dir = 1`, userID).Scan(&n)
 	return n, err
 }
+
+// SearchNodes finds entries whose name matches a LIKE pattern, within a scope.
+//
+// The match is on the name rather than the full path, which is what somebody
+// typing into a search box means. No index can serve a leading wildcard, so the
+// query walks the account's entries - which is why the caller always passes a
+// limit, and why scoping it to a subtree matters.
+func SearchNodes(ctx context.Context, q Querier, userID int64, scope, pattern string, limit int) ([]Node, error) {
+	like := pattern
+
+	// Scoped with a range over the path index where possible, so searching
+	// inside a folder does not read the whole account.
+	if scope != "." && scope != "" {
+		lo, hi, ok := PrefixRange(scope + "/")
+		if !ok {
+			return nil, nil
+		}
+		rows, err := q.QueryContext(ctx, `
+			SELECT `+nodeColumns+` FROM nodes
+			WHERE user_id = ? AND path >= ? AND path < ? AND name LIKE ? ESCAPE '\'
+			ORDER BY path
+			LIMIT ?`, userID, lo, hi, like, limit)
+		if err != nil {
+			return nil, err
+		}
+		return collectNodes(rows)
+	}
+
+	rows, err := q.QueryContext(ctx, `
+		SELECT `+nodeColumns+` FROM nodes
+		WHERE user_id = ? AND path <> '.' AND name LIKE ? ESCAPE '\'
+		ORDER BY path
+		LIMIT ?`, userID, like, limit)
+	if err != nil {
+		return nil, err
+	}
+	return collectNodes(rows)
+}

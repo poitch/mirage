@@ -146,6 +146,33 @@ func (s *Server) routes() http.Handler {
 	// Clients call this when an account is removed, to revoke their own token.
 	mux.Handle("DELETE /ocs/v2.php/core/apppassword", protected(s.ocs.DeleteAppPassword(ocs.V2)))
 
+	// The provisioning API. The mobile apps poll this for the account screen.
+	mux.Handle("GET /ocs/v1.php/cloud/users/{userid}", protected(s.ocs.UserDetails(ocs.V1)))
+	mux.Handle("GET /ocs/v2.php/cloud/users/{userid}", protected(s.ocs.UserDetails(ocs.V2)))
+
+	// Endpoints the apps ask about on every connection. Each has an honest
+	// answer, and answering is what stops the app retrying.
+	mux.Handle("GET /ocs/v1.php/core/navigation/apps", protected(s.ocs.NavigationApps(ocs.V1)))
+	mux.Handle("GET /ocs/v2.php/core/navigation/apps", protected(s.ocs.NavigationApps(ocs.V2)))
+	mux.Handle("GET /ocs/v1.php/apps/terms_of_service/terms", protected(s.ocs.Terms(ocs.V1)))
+	mux.Handle("GET /ocs/v2.php/apps/terms_of_service/terms", protected(s.ocs.Terms(ocs.V2)))
+	mux.Handle("POST /ocs/v2.php/apps/notifications/api/v2/push", protected(s.ocs.PushRegistration(ocs.V2)))
+	mux.Handle("DELETE /ocs/v2.php/apps/notifications/api/v2/push", protected(s.ocs.PushRegistration(ocs.V2)))
+
+	// Avatars. Clients ask for these on several paths; all of them draw the
+	// same generated image.
+	for _, pattern := range []string{
+		"/remote.php/dav/avatars/{user}/{size}",
+		"/index.php/avatar/{user}/{size}",
+		"/avatar/{user}/{size}",
+	} {
+		mux.Handle("GET "+pattern, protected(http.HandlerFunc(s.ocs.Avatar)))
+		mux.Handle("HEAD "+pattern, protected(http.HandlerFunc(s.ocs.Avatar)))
+		// The apps append /dark when the device is in dark mode. The generated
+		// mark reads the same either way, so both return it.
+		mux.Handle("GET "+pattern+"/dark", protected(http.HandlerFunc(s.ocs.Avatar)))
+	}
+
 	// WebDAV. Methods are dispatched inside the handler rather than by the mux
 	// so that PROPFIND and the other extension verbs share one route.
 	mux.Handle("/remote.php/dav/files/{user}/{path...}", protected(s.dav))
@@ -156,6 +183,9 @@ func (s *Server) routes() http.Handler {
 
 	// Chunked upload, which clients use for anything large.
 	mux.Handle("/remote.php/dav/uploads/{user}/{path...}", protected(s.uploads))
+
+	// Search. Clients send this to the DAV root rather than to a collection.
+	mux.Handle(dav.SearchPath, protected(http.HandlerFunc(s.dav.ServeSearch)))
 
 	// notify_push. The websocket is not behind the Basic auth middleware: the
 	// protocol authenticates itself after the handshake, and a browser cannot
