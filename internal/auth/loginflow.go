@@ -226,8 +226,21 @@ func (lf *LoginFlow) Page(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	lf.log.Info("device authorised", "user", user.Username, "device", device)
-	lf.render(w, "granted.html", http.StatusOK, pageData{Device: device})
+	lf.log.Info("device authorised", "user", user.Username, "device", device, "flow", "v2")
+
+	// The credential is handed over here as well as through polling.
+	//
+	// Polling is how the desktop client collects it, and for that this page
+	// only has to say the sign-in worked. A mobile app opens this page inside
+	// itself, and what dismisses that browser is the navigation to the scheme
+	// the app registered - so without it the app sits on a page reading
+	// "Device connected" having received nothing, which is indistinguishable
+	// from a hang. The same URL serves both: an app that is polling has its
+	// credential already and simply comes to the foreground.
+	lf.render(w, "granted.html", http.StatusOK, pageData{
+		Device:  device,
+		Handoff: template.URL(HandoffURL(lf.externalURL, user.Username, appPassword)),
+	})
 }
 
 func (lf *LoginFlow) renderExpired(w http.ResponseWriter) {

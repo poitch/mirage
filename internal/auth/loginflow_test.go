@@ -315,3 +315,39 @@ func TestHandoffURLEscaping(t *testing.T) {
 		t.Errorf("handoffURL =\n  %s\nwant\n  %s", got, want)
 	}
 }
+
+// TestPollingFlowAlsoHandsOverToTheApp: the desktop client collects its
+// credential by polling and needs nothing more from this page, but a mobile app
+// opens it inside itself and is dismissed by the navigation to its scheme.
+// Without that it sits on a page saying the sign-in worked, having received
+// nothing - which looks exactly like a hang.
+func TestPollingFlowAlsoHandsOverToTheApp(t *testing.T) {
+	_, h := testLoginFlow(t)
+	pollToken, loginPath := start(t, h, "Mozilla/5.0 (iPhone) Nextcloud-iOS/4.9.0")
+
+	rec := approve(t, h, loginPath, "alice", "alice-account-password")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("approve: status = %d, want 200", rec.Code)
+	}
+	body := html.UnescapeString(rec.Body.String())
+	if !strings.Contains(body, "nc://login/server:https://mirage.example.com&user:alice&password:") {
+		t.Fatalf("the grant page does not hand over to the app:\n%s", body)
+	}
+	if !strings.Contains(body, `http-equiv="refresh"`) {
+		t.Error("nothing navigates to the handover URL")
+	}
+
+	// Polling must still deliver the same credential, since that is how the
+	// desktop client gets it.
+	resp := poll(t, h, pollToken)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("poll after approval: status = %d, want 200", resp.Code)
+	}
+	var granted pollResponse
+	if err := json.Unmarshal(resp.Body.Bytes(), &granted); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !strings.Contains(body, granted.AppPassword) {
+		t.Error("the page hands over a different credential than the one polling returns")
+	}
+}
