@@ -249,7 +249,9 @@ func (db *DB) migrate(ctx context.Context) error {
 	// one builds a search index over every indexed file, which on a large share
 	// takes minutes - and a server that goes quiet during an upgrade is one
 	// somebody restarts halfway through.
-	if current < len(migrations) && db.log != nil {
+	// Only for an upgrade. A database being created has nothing to wait for and
+	// the message would appear on every start of a fresh install.
+	if current > 0 && current < len(migrations) && db.log != nil {
 		db.log.Info("bringing the index database up to date",
 			"from_version", current, "to_version", len(migrations),
 			"note", "a large share can take several minutes; do not interrupt it")

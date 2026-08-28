@@ -13,6 +13,16 @@ const qualifiedNodeColumns = `nodes.id, nodes.user_id, COALESCE(nodes.parent_id,
 	`nodes.name, nodes.is_dir, nodes.size, nodes.mtime, nodes.etag, nodes.content_type, ` +
 	`nodes.dev, nodes.inode, nodes.scanned_at, nodes.complete`
 
+// SubstringPattern turns text somebody typed into a LIKE pattern that finds it
+// anywhere in a name.
+//
+// The wildcards in the text are escaped, because a person searching for "50%"
+// means those characters and not "anything at all".
+func SubstringPattern(term string) string {
+	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(term)
+	return "%" + escaped + "%"
+}
+
 // trigramMin is the shortest run of text the index can find.
 //
 // The index records every three-letter run, so a run of one or two characters
@@ -31,9 +41,17 @@ const trigramMin = 3
 // offer one that does not match, without the result changing - it only makes
 // the search fast. That is deliberate: a search index that has to be perfect to
 // be correct is one that silently returns the wrong thing when it drifts.
-func SearchNodes(ctx context.Context, q Querier, userID int64, scope, pattern string, limit int) ([]Node, error) {
+func SearchNodes(ctx context.Context, q Querier, userID int64, scope, pattern, after string, limit int) ([]Node, error) {
 	where := []string{"nodes.user_id = ?", `nodes.name LIKE ? ESCAPE '\'`}
 	args := []any{userID, pattern}
+
+	// Results are ordered by path, so continuing from the last one seen is a
+	// matter of asking for what sorts after it. That stays correct as rows are
+	// added or removed between pages, which an offset would not.
+	if after != "" {
+		where = append(where, "nodes.path > ?")
+		args = append(args, after)
+	}
 
 	// Scoping with a range over the path index is more selective than anything
 	// the name index can offer, and costs nothing to add.

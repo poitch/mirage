@@ -116,7 +116,7 @@ func (h *Handler) handleSearch(w http.ResponseWriter, r *http.Request) {
 		props = allPropNames
 	}
 
-	matches, err := store.SearchNodes(r.Context(), h.db, user.ID, scope, pattern, limit)
+	matches, err := store.SearchNodes(r.Context(), h.db, user.ID, scope, pattern, "", limit)
 	if err != nil {
 		h.internalError(w, "search", err)
 		return

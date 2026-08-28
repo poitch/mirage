@@ -80,7 +80,7 @@ func BenchmarkSearchNodes(b *testing.B) {
 	} {
 		b.Run(tc.name, func(b *testing.B) {
 			for b.Loop() {
-				if _, err := SearchNodes(ctx, db, u.ID, ".", tc.pattern, 100); err != nil {
+				if _, err := SearchNodes(ctx, db, u.ID, ".", tc.pattern, "", 100); err != nil {
 					b.Fatalf("SearchNodes: %v", err)
 				}
 			}

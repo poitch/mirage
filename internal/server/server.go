@@ -185,8 +185,21 @@ func (s *Server) routes() http.Handler {
 	// Chunked upload, which clients use for anything large.
 	mux.Handle("/remote.php/dav/uploads/{user}/{path...}", protected(s.uploads))
 
-	// Search. Clients send this to the DAV root rather than to a collection.
+	// Search. There are two unrelated APIs for it: the mobile apps send WebDAV
+	// SEARCH to the DAV root, and the desktop client uses the OCS unified
+	// search. Both are answered from the same index.
 	mux.Handle(dav.SearchPath, protected(http.HandlerFunc(s.dav.ServeSearch)))
+	for _, v := range []struct {
+		prefix  string
+		version ocs.Version
+	}{{"/ocs/v1.php", ocs.V1}, {"/ocs/v2.php", ocs.V2}} {
+		mux.Handle("GET "+v.prefix+"/search/providers", protected(s.ocs.SearchProviders(v.version)))
+		mux.Handle("GET "+v.prefix+"/search/providers/{providerId}/search",
+			protected(s.ocs.Search(v.version)))
+	}
+	// Where a search result points. Nextcloud opens these in its web interface;
+	// Mirage redirects to the file itself.
+	mux.Handle("GET /index.php/f/{fileid}", protected(http.HandlerFunc(s.ocs.OpenFile)))
 
 	// notify_push. The websocket is not behind the Basic auth middleware: the
 	// protocol authenticates itself after the handshake, and a browser cannot

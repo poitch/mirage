@@ -236,6 +236,12 @@ func (h *Handler) writeNode(ms *multistatus, user store.User, node store.Node, u
 // Directories carry a trailing slash: clients use it to tell a collection from
 // a file before they have parsed the resourcetype property.
 func (h *Handler) href(username, path string, isDir bool) string {
+	return Href(username, path, isDir)
+}
+
+// Href builds the WebDAV URL path for a file, for the other packages that need
+// to point at one.
+func Href(username, path string, isDir bool) string {
 	p := FilesPrefix + username
 	if path != "." && path != "" {
 		p += "/" + path

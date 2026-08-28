@@ -102,7 +102,7 @@ func TestSearchNodesMatchesSubstrings(t *testing.T) {
 	db, u := searchFixture(t,
 		"Quarterly Report 2024.pdf", "holiday-photo.jpg", "report-draft.txt", "REPORT-CAPS.txt")
 
-	got, err := SearchNodes(ctx, db, u.ID, ".", "%report%", 100)
+	got, err := SearchNodes(ctx, db, u.ID, ".", "%report%", "", 100)
 	if err != nil {
 		t.Fatalf("SearchNodes: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestSearchNodesFindsShortTerms(t *testing.T) {
 		{"%ab%", 1},
 		{"%a%", 2}, // ab-notes.txt and holiday.jpg
 	} {
-		got, err := SearchNodes(ctx, db, u.ID, ".", tc.pattern, 100)
+		got, err := SearchNodes(ctx, db, u.ID, ".", tc.pattern, "", 100)
 		if err != nil {
 			t.Fatalf("SearchNodes(%q): %v", tc.pattern, err)
 		}
@@ -142,7 +142,7 @@ func TestSearchNodesHonoursEscapedWildcards(t *testing.T) {
 	ctx := context.Background()
 	db, u := searchFixture(t, "50% off sale.pdf", "50 off sale.pdf")
 
-	got, err := SearchNodes(ctx, db, u.ID, ".", `%50\% off%`, 100)
+	got, err := SearchNodes(ctx, db, u.ID, ".", `%50\% off%`, "", 100)
 	if err != nil {
 		t.Fatalf("SearchNodes: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestSearchIndexFollowsWrites(t *testing.T) {
 
 	found := func(term string) int {
 		t.Helper()
-		got, err := SearchNodes(ctx, db, u.ID, ".", "%"+term+"%", 100)
+		got, err := SearchNodes(ctx, db, u.ID, ".", "%"+term+"%", "", 100)
 		if err != nil {
 			t.Fatalf("SearchNodes(%q): %v", term, err)
 		}
@@ -300,7 +300,7 @@ func TestSearchIndexBackfillsExistingRows(t *testing.T) {
 	}
 
 	for _, term := range []string{"aardvark", "holiday"} {
-		got, err := SearchNodes(ctx, db, u.ID, ".", "%"+term+"%", 100)
+		got, err := SearchNodes(ctx, db, u.ID, ".", "%"+term+"%", "", 100)
 		if err != nil {
 			t.Fatalf("SearchNodes(%q): %v", term, err)
 		}
@@ -315,7 +315,7 @@ func TestSearchIndexBackfillsExistingRows(t *testing.T) {
 	}, Stamp()); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
-	got, err := SearchNodes(ctx, db, u.ID, ".", "%buffalo%", 100)
+	got, err := SearchNodes(ctx, db, u.ID, ".", "%buffalo%", "", 100)
 	if err != nil {
 		t.Fatalf("SearchNodes: %v", err)
 	}
