@@ -318,19 +318,41 @@ func (s *Server) rescan(ctx context.Context) {
 			if err := s.scanner.ScanAll(ctx, "periodic rescan"); err != nil && !errors.Is(err, context.Canceled) {
 				s.log.Error("rescan failed", "error", err)
 			}
-			if taken := time.Since(started); taken > interval {
-				// Worth saying plainly: the setting cannot do what it says, and
-				// the operator is the only one who can decide what to do about
-				// it - raise the interval, or exclude what is expensive.
-				s.log.Warn("a full rescan takes longer than the interval between them; "+
-					"the next begins after the configured gap regardless",
-					"took", taken.Round(time.Second), "interval", interval,
-					"hint", "raise storage.rescan_interval, or exclude directories "+
-						"that are costly to index with storage.exclude")
-			}
-			timer.Reset(interval)
+			timer.Reset(s.nextGap("full rescan", interval, time.Since(started)))
 		}
 	}
+}
+
+// maxDutyCycle bounds the share of time that may be spent scanning.
+//
+// A pass that takes longer than the gap configured after it would otherwise
+// start the next one the moment it finished, and on a large share that is
+// scanning without pause - disks that never spin down, for a share whose
+// contents are mostly archives that have not changed in years. Rather than
+// leave that to be noticed in a log, the gap grows to keep the duty cycle
+// under this.
+const maxDutyCycle = 0.25
+
+// nextGap returns how long to wait before the next pass of this kind.
+//
+// Normally the configured interval. When a pass took long enough that
+// honouring the interval would mean scanning most of the time, the gap widens
+// instead, and says so - because the setting can no longer mean what it reads
+// like, and only the operator can decide whether to accept the slower cadence
+// or reduce the work.
+func (s *Server) nextGap(kind string, interval, took time.Duration) time.Duration {
+	floor := time.Duration(float64(took) * (1 - maxDutyCycle) / maxDutyCycle)
+	if floor <= interval {
+		return interval
+	}
+	s.log.Warn("a "+kind+" takes long enough that the configured interval would mean "+
+		"scanning almost continuously; waiting longer instead",
+		"took", took.Round(time.Second),
+		"configured_interval", interval,
+		"waiting", floor.Round(time.Second),
+		"hint", "this is the cost of the share as it stands; lower it with "+
+			"storage.exclude, or accept the slower cadence")
+	return floor
 }
 
 // quickRescan runs the cheap pass that finds files added, removed or renamed.
@@ -358,13 +380,7 @@ func (s *Server) quickRescan(ctx context.Context) {
 			if err := s.scanner.QuickScanAll(ctx, "quick rescan"); err != nil && !errors.Is(err, context.Canceled) {
 				s.log.Error("quick rescan failed", "error", err)
 			}
-			if taken := time.Since(started); taken > interval {
-				s.log.Warn("a quick rescan takes longer than the interval between them",
-					"took", taken.Round(time.Second), "interval", interval,
-					"hint", "raise storage.quick_rescan_interval, or exclude "+
-						"directories with storage.exclude")
-			}
-			timer.Reset(interval)
+			timer.Reset(s.nextGap("quick rescan", interval, time.Since(started)))
 		}
 	}
 }

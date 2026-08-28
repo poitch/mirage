@@ -44,6 +44,16 @@ storage:
   #
   # This is what decides how long a file dropped over SMB takes to appear on
   # clients, on a share too large for the kernel to watch every directory of.
+  #
+  # A quick pass costs one stat per directory, so on a share with hundreds of
+  # thousands of them it is minutes rather than seconds. Measure yours before
+  # choosing a number:
+  #
+  #     mirage scan -quick
+  #
+  # Whatever is set here, Mirage will not spend more than a quarter of its time
+  # scanning: a pass that takes longer than the gap after it widens the gap
+  # rather than starting the next one immediately, and says so in the log.
   quick_rescan_interval: 5m
 
   # Watch the filesystem for changes as they happen, which is faster than any

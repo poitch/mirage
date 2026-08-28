@@ -1,6 +1,8 @@
 package server
 
 import (
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 )
@@ -40,4 +42,48 @@ func TestRescanIntervalIsAGapNotASchedule(t *testing.T) {
 	default:
 		// Expected: the next scan waits a full interval.
 	}
+}
+
+// TestScanningCannotBecomeContinuous is the property that matters on a large
+// share: a pass that takes longer than the gap configured after it must not
+// cause the next to begin immediately. Spinning disks that never rest, for a
+// share that is mostly archives, is a real cost and not a theoretical one.
+func TestScanningCannotBecomeContinuous(t *testing.T) {
+	s := &Server{log: discardLogger()}
+
+	tests := []struct {
+		name     string
+		interval time.Duration
+		took     time.Duration
+		wantMin  time.Duration
+	}{
+		// Comfortably inside the interval: the configured gap stands.
+		{"quick pass on a small share", 5 * time.Minute, 2 * time.Second, 5 * time.Minute},
+		// Right at the edge of the budget: still the configured gap.
+		{"pass using a quarter of the budget", 5 * time.Minute, 75 * time.Second, 5 * time.Minute},
+		// Longer than the interval: the gap has to widen, or the next pass
+		// starts the instant this one ends.
+		{"pass longer than the interval", 5 * time.Minute, 10 * time.Minute, 30 * time.Minute},
+		// A full walk of a very large share.
+		{"forty minute walk, six hour interval", 6 * time.Hour, 40 * time.Minute, 6 * time.Hour},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := s.nextGap("test pass", tc.interval, tc.took)
+			if got < tc.wantMin {
+				t.Errorf("gap = %v, want at least %v", got, tc.wantMin)
+			}
+			// Whatever the numbers, the share of time spent scanning stays
+			// bounded - which is the whole point.
+			duty := float64(tc.took) / float64(tc.took+got)
+			if duty > maxDutyCycle+0.01 {
+				t.Errorf("would scan %.0f%% of the time, want at most %.0f%%",
+					duty*100, maxDutyCycle*100)
+			}
+		})
+	}
+}
+
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
