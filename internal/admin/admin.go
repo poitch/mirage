@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/poitch/mirage/internal/auth"
+	"github.com/poitch/mirage/internal/avatar"
 	"github.com/poitch/mirage/internal/fsx"
 	"github.com/poitch/mirage/internal/index"
 	"github.com/poitch/mirage/internal/store"
@@ -118,7 +119,13 @@ func (ad *Admin) Routes(mux *http.ServeMux) {
 	mux.Handle("POST /admin/users/{id}/delete", ad.guard(ad.deleteUser))
 	mux.Handle("POST /admin/users/{id}/scan", ad.guard(ad.scanUser))
 	mux.Handle("POST /admin/users/{id}/device", ad.guard(ad.setUpDevice))
+	mux.Handle("GET /admin/users/{id}/avatar", ad.guard(ad.showAvatar))
+	mux.Handle("POST /admin/users/{id}/avatar", ad.guard(ad.setAvatar))
 }
+
+// maxAdminBody caps an admin form submission. Everything here is a handful of
+// fields except the account picture, which sets the size.
+const maxAdminBody = avatar.MaxUploadBytes + (1 << 20)
 
 // guard requires a live session, and a matching CSRF token on writes.
 func (ad *Admin) guard(h func(http.ResponseWriter, *http.Request, *session)) http.Handler {
@@ -133,6 +140,12 @@ func (ad *Admin) guard(h func(http.ResponseWriter, *http.Request, *session)) htt
 			clearSessionCookie(w, ad.secure)
 			ad.redirectToLogin(w, r)
 			return
+		}
+		// Bounded before anything reads the form. One of these endpoints takes
+		// an uploaded image, and r.FormValue would otherwise buffer whatever
+		// arrived before the size could be checked.
+		if r.Method == http.MethodPost {
+			r.Body = http.MaxBytesReader(w, r.Body, maxAdminBody)
 		}
 		// The session cookie is SameSite=Lax, which stops cross-site POSTs on
 		// its own; the token is the belt to that braces, and costs nothing.
@@ -223,6 +236,12 @@ type pageData struct {
 	// for the render that produced them; the credential cannot be shown again.
 	QR       template.HTML
 	SetupURL string
+	// HasAvatar reports whether a picture was uploaded, which decides whether
+	// the page offers to remove it. AvatarVersion busts the browser's cache of
+	// the preview so a new upload is visible at once.
+	HasAvatar       bool
+	AvatarVersion   int64
+	AvatarCanonical int
 }
 
 type userForm struct {
@@ -305,6 +324,12 @@ func (ad *Admin) editUserForm(w http.ResponseWriter, r *http.Request, sess *sess
 		return
 	}
 	probe := fsx.ProbeHome(u.Home, u.UID, u.GID)
+	// A failure here only costs the page the offer to remove a picture, which
+	// is not worth refusing to render the account over.
+	uploaded, err := ad.db.AvatarVersion(r.Context(), u.ID)
+	if err != nil {
+		ad.log.Warn("could not read the account picture", "user", u.Username, "error", err)
+	}
 	ad.render(w, "user_form.html", http.StatusOK, pageData{
 		Title: u.Username, CSRF: sess.csrf, ReadOnly: ad.readOnly,
 		User: &u, Probe: &probe, Notice: r.URL.Query().Get("notice"),
@@ -313,8 +338,11 @@ func (ad *Admin) editUserForm(w http.ResponseWriter, r *http.Request, sess *sess
 			UID: strconv.Itoa(u.UID), GID: strconv.Itoa(u.GID),
 			QuotaGB: quotaToGB(u.Quota),
 		},
-		RunningAsRoot: os.Geteuid() == 0,
-		Mounts:        fsx.DataMounts(),
+		RunningAsRoot:   os.Geteuid() == 0,
+		Mounts:          fsx.DataMounts(),
+		HasAvatar:       !uploaded.IsZero(),
+		AvatarVersion:   uploaded.UnixNano(),
+		AvatarCanonical: avatar.Canonical,
 	})
 }
 
@@ -535,7 +563,8 @@ func (ad *Admin) render(w http.ResponseWriter, name string, status int, data pag
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Content-Security-Policy",
-		"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
+		"default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; "+
+			"form-action 'self'; frame-ancestors 'none'")
 	w.WriteHeader(status)
 	if err := ad.tmpl.ExecuteTemplate(w, name, data); err != nil {
 		ad.log.Error("could not render the admin page", "template", name, "error", err)

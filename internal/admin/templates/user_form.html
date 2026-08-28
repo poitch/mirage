@@ -94,6 +94,35 @@
 
     <hr>
     <div>
+      <h2>Picture</h2>
+      <p class="hint" style="margin-bottom:.6rem">
+        Shown next to this account in the sync clients. Without one, Mirage
+        draws a mark from the username so accounts still tell apart. PNG, JPEG
+        or GIF; it is cropped square and stored at {{ .AvatarCanonical }}px.
+      </p>
+      <div class="avatar-row">
+        <img class="avatar" width="96" height="96" alt=""
+             src="/admin/users/{{ .User.ID }}/avatar?v={{ .AvatarVersion }}">
+        <div class="avatar-forms">
+          <form method="post" action="/admin/users/{{ .User.ID }}/avatar"
+                enctype="multipart/form-data">
+            <input type="hidden" name="csrf" value="{{ .CSRF }}">
+            <input type="file" name="avatar" accept="image/png,image/jpeg,image/gif" required>
+            <button type="submit">Upload picture</button>
+          </form>
+          {{ if .HasAvatar }}
+          <form method="post" action="/admin/users/{{ .User.ID }}/avatar">
+            <input type="hidden" name="csrf" value="{{ .CSRF }}">
+            <input type="hidden" name="action" value="clear">
+            <button type="submit" class="quiet">Remove, use the generated one</button>
+          </form>
+          {{ end }}
+        </div>
+      </div>
+    </div>
+
+    <hr>
+    <div>
       <h2>Set up a device</h2>
       <p class="hint" style="margin-bottom:.6rem">
         Produces a code to scan in the Nextcloud app, which signs a phone or

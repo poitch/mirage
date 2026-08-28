@@ -13,6 +13,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/poitch/mirage/internal/auth"
+	"github.com/poitch/mirage/internal/avatar"
 	"github.com/poitch/mirage/internal/fsx"
 	"github.com/poitch/mirage/internal/index"
 	"github.com/poitch/mirage/internal/store"
@@ -25,6 +26,7 @@ const userUsage = `Usage:
   mirage user passwd <username>    Set an account password
   mirage user enable <username>    Re-enable a disabled account
   mirage user disable <username>   Disable an account without deleting it
+  mirage user avatar <username>    Set the account picture (see flags below)
 
 Flags for "add":
   -home   Directory backing the account, as seen inside the container (required)
@@ -32,6 +34,10 @@ Flags for "add":
   -gid    Owner gid for files Mirage creates (required)
   -name   Display name (defaults to the username)
   -quota  Storage limit in GB (0 or omitted means unlimited)
+
+Flags for "avatar":
+  -image  PNG, JPEG or GIF to use; cropped square and stored at 512px
+  -clear  Remove the picture, so a mark drawn from the username is used instead
 
 Accounts are normally managed from the admin page at /admin. These commands
 exist for scripting, and so that a server with no admin password set is still
@@ -48,6 +54,13 @@ func cmdUser(args []string) error {
 	sub, rest := args[0], args[1:]
 	fs := flag.NewFlagSet("user "+sub, flag.ExitOnError)
 	configPath, verbose := configFlags(fs)
+
+	var avatarImage string
+	var avatarClear bool
+	if sub == "avatar" {
+		fs.StringVar(&avatarImage, "image", "", "PNG, JPEG or GIF to use as the picture")
+		fs.BoolVar(&avatarClear, "clear", false, "remove the picture and use a generated one")
+	}
 
 	var addHome, addName string
 	var addUID, addGID int
@@ -92,6 +105,8 @@ func cmdUser(args []string) error {
 		return userPasswd(ctx, db, username)
 	case "enable", "disable":
 		return userSetDisabled(ctx, db, username, sub == "disable")
+	case "avatar":
+		return userAvatar(ctx, db, username, avatarImage, avatarClear)
 	default:
 		fmt.Fprint(os.Stderr, userUsage)
 		return fmt.Errorf("unknown subcommand %q", sub)
@@ -223,6 +238,48 @@ func userSetDisabled(ctx context.Context, db *store.DB, username string, disable
 	} else {
 		fmt.Printf("%s enabled.\n", username)
 	}
+	return nil
+}
+
+// userAvatar sets or removes an account's picture.
+func userAvatar(ctx context.Context, db *store.DB, username, imagePath string, clear bool) error {
+	u, err := db.UserByName(ctx, username)
+	if errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("no account %q", username)
+	} else if err != nil {
+		return err
+	}
+
+	if clear {
+		if imagePath != "" {
+			return errors.New("give either -image or -clear, not both")
+		}
+		if err := db.ClearAvatar(ctx, u.ID); err != nil {
+			return err
+		}
+		fmt.Printf("Picture removed for %s; a mark drawn from the username is used instead.\n", username)
+		return nil
+	}
+	if imagePath == "" {
+		return errors.New("-image is required; give a PNG, JPEG or GIF (or -clear to remove one)")
+	}
+
+	data, err := os.ReadFile(imagePath)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", imagePath, err)
+	}
+	normalised, err := avatar.Normalise(data)
+	if err != nil {
+		return err
+	}
+	if err := db.SetAvatar(ctx, u.ID, normalised); err != nil {
+		return err
+	}
+
+	fmt.Printf("Picture set for %s (%s stored).\n", username, formatBytes(int64(len(normalised))))
+	// Said plainly because it looks broken otherwise: the picture is right on
+	// the server and the client still shows the old one for a while.
+	fmt.Println("Clients cache avatars for up to a day, so it may not appear straight away.")
 	return nil
 }
 

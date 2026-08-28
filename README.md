@@ -32,7 +32,7 @@ Early development. Milestone progress:
 - [x] **M4** — chunked upload for large files
 - [x] **M5** — out-of-band changes: watcher, rescan, rename detection
 - [x] **M6** — instant sync via notify_push
-- [x] search by filename, generated account avatars
+- [x] search by filename, account pictures
 - [ ] **M7** — trashbin, versions, previews
 - [ ] **M8** — quotas, rate limiting, hardening
 

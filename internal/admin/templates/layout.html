@@ -65,7 +65,15 @@
   button:hover { filter: brightness(1.07); }
   button.secondary { background: transparent; color: var(--fg); border: 1px solid var(--line); }
   button.danger { background: transparent; color: var(--err); border: 1px solid var(--err-line); }
+  button.quiet {
+    background: transparent; color: var(--muted); border: 1px solid var(--line);
+    font-weight: 500; font-size: .88rem;
+  }
   .actions { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+  .avatar-row { display: flex; gap: 1rem; align-items: flex-start; flex-wrap: wrap; }
+  .avatar { border-radius: 50%; background: var(--line); flex: none; }
+  .avatar-forms { display: flex; flex-direction: column; gap: .6rem; min-width: 15rem; flex: 1; }
+  .avatar-forms input[type=file] { font-size: .88rem; }
   a.button {
     display: inline-block; padding: .55rem .95rem; border-radius: 8px; font-weight: 600;
     font-size: .95rem; text-decoration: none; background: var(--accent); color: var(--accent-fg);

@@ -38,23 +38,37 @@ func (s *Service) Avatar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A conditional request is answered without reading the image out of the
+	// database, which is most requests: clients ask far more often than a
+	// picture changes.
+	uploaded, err := s.db.AvatarVersion(r.Context(), u.ID)
+	if err != nil {
+		s.log.Error("could not read an avatar version", "user", username, "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
 	// Seeded on the account id as well as the name, so that deleting an account
 	// and making another with the same name does not silently inherit its mark.
+	custom := !uploaded.IsZero()
 	etag := avatar.ETag(avatarSeed(u), size)
+	if custom {
+		etag = avatar.UploadedETag(avatarSeed(u), uploaded, size)
+	}
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Cache-Control", "private, max-age="+strconv.Itoa(avatarMaxAge))
 	// Clients read this to decide whether the picture is the person's own or one
 	// the server made up; some will offer an upload control when it is 0.
-	w.Header().Set("X-NC-IsCustomAvatar", "0")
+	w.Header().Set("X-NC-IsCustomAvatar", boolDigit(custom))
 
 	if match := r.Header.Get("If-None-Match"); match != "" && etagMatches(match, etag) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
 
-	png, err := avatar.Generate(avatarSeed(u), size)
+	png, err := s.avatarImage(r, u, size, custom)
 	if err != nil {
-		s.log.Error("could not draw an avatar", "user", username, "error", err)
+		s.log.Error("could not produce an avatar", "user", username, "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -93,4 +107,39 @@ func etagMatches(header, etag string) bool {
 		}
 	}
 	return false
+}
+
+// avatarImage produces the bytes to send: the account's own picture if it has
+// one, and a generated mark otherwise.
+//
+// A stored picture that cannot be decoded falls back to the generated one
+// rather than failing. The upload path rejects anything unreadable, so this
+// only arises if a row was corrupted - and a picture is not worth an error
+// page for.
+func (s *Service) avatarImage(r *http.Request, u store.User, size int, custom bool) ([]byte, error) {
+	if custom {
+		stored, err := s.db.AvatarFor(r.Context(), u.ID)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			// Removed between the version check and here.
+		case err != nil:
+			return nil, err
+		default:
+			rendered, err := avatar.Render(stored.Image, size)
+			if err == nil {
+				return rendered, nil
+			}
+			s.log.Warn("stored avatar could not be decoded; using a generated one",
+				"user", u.Username, "error", err)
+		}
+	}
+	return avatar.Generate(avatarSeed(u), size)
+}
+
+// boolDigit renders a flag the way the OCS headers spell it.
+func boolDigit(b bool) string {
+	if b {
+		return "1"
+	}
+	return "0"
 }

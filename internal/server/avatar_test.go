@@ -3,10 +3,15 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"image"
+	"image/color"
+	"image/draw"
 	"image/png"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/poitch/mirage/internal/avatar"
 )
 
 func TestAvatarIsServedOnEveryPathTheClientsUse(t *testing.T) {
@@ -198,5 +203,101 @@ func TestPushRegistrationIsRefused(t *testing.T) {
 	readBody(t, resp)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+// storeAvatar puts an uploaded picture on an account, as the admin page does.
+func storeAvatar(t *testing.T, h *harness, username string, c color.RGBA) {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 256, 256))
+	draw.Draw(img, img.Bounds(), &image.Uniform{C: c}, image.Point{}, draw.Src)
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	normalised, err := avatar.Normalise(buf.Bytes())
+	if err != nil {
+		t.Fatalf("normalise: %v", err)
+	}
+	u, err := h.db.UserByName(t.Context(), username)
+	if err != nil {
+		t.Fatalf("look up %s: %v", username, err)
+	}
+	if err := h.db.SetAvatar(t.Context(), u.ID, normalised); err != nil {
+		t.Fatalf("set avatar: %v", err)
+	}
+}
+
+func TestUploadedAvatarIsServedInsteadOfTheGeneratedOne(t *testing.T) {
+	h := newHarness(t)
+	generated := readBody(t, h.do("GET", "/remote.php/dav/avatars/alice/128.png",
+		"alice", alicePassword, "", nil))
+
+	storeAvatar(t, h, "alice", color.RGBA{R: 0x20, G: 0xa0, B: 0x60, A: 0xff})
+
+	resp := h.do("GET", "/remote.php/dav/avatars/alice/128.png", "alice", alicePassword, "", nil)
+	body := readBody(t, resp)
+	if body == generated {
+		t.Fatal("the uploaded picture was ignored")
+	}
+	if got := resp.Header.Get("X-NC-IsCustomAvatar"); got != "1" {
+		t.Errorf("X-NC-IsCustomAvatar = %q, want 1 for an uploaded picture", got)
+	}
+	img, err := png.Decode(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := img.Bounds().Dx(); got != 128 {
+		t.Errorf("uploaded picture served at %dpx, want 128", got)
+	}
+	r, g, b, _ := img.At(64, 64).RGBA()
+	if r>>8 > 0x60 || g>>8 < 0x80 || b>>8 > 0x90 {
+		t.Errorf("served picture is not the uploaded colour: %02x%02x%02x", r>>8, g>>8, b>>8)
+	}
+}
+
+// TestChangingTheAvatarChangesTheETag: clients cache these for a day, so a new
+// picture that reuses the old tag would not appear until the cache expired.
+func TestChangingTheAvatarChangesTheETag(t *testing.T) {
+	h := newHarness(t)
+	etag := func() string {
+		resp := h.do("GET", "/remote.php/dav/avatars/alice/128.png", "alice", alicePassword, "", nil)
+		resp.Body.Close()
+		return resp.Header.Get("ETag")
+	}
+
+	before := etag()
+	storeAvatar(t, h, "alice", color.RGBA{R: 0xff, A: 0xff})
+	afterUpload := etag()
+	if afterUpload == before {
+		t.Error("uploading a picture did not change the ETag")
+	}
+
+	storeAvatar(t, h, "alice", color.RGBA{B: 0xff, A: 0xff})
+	if etag() == afterUpload {
+		t.Error("replacing the picture did not change the ETag")
+	}
+
+	u, _ := h.db.UserByName(t.Context(), "alice")
+	if err := h.db.ClearAvatar(t.Context(), u.ID); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if got := etag(); got != before {
+		t.Errorf("removing the picture gave ETag %q, want the generated one %q", got, before)
+	}
+}
+
+func TestClearedAvatarFallsBackToTheGeneratedOne(t *testing.T) {
+	h := newHarness(t)
+	storeAvatar(t, h, "alice", color.RGBA{R: 0xff, A: 0xff})
+	u, _ := h.db.UserByName(t.Context(), "alice")
+	if err := h.db.ClearAvatar(t.Context(), u.ID); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+
+	resp := h.do("GET", "/remote.php/dav/avatars/alice/128.png", "alice", alicePassword, "", nil)
+	defer resp.Body.Close()
+	if got := resp.Header.Get("X-NC-IsCustomAvatar"); got != "0" {
+		t.Errorf("X-NC-IsCustomAvatar = %q, want 0 after removing the picture", got)
 	}
 }

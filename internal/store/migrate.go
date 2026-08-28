@@ -166,6 +166,19 @@ ALTER TABLE nodes ADD COLUMN mtime_nsec INTEGER NOT NULL DEFAULT 0;
 	`
 CREATE INDEX idx_nodes_dir_mtime ON nodes(user_id, is_dir, mtime DESC);
 `,
+	// 7: uploaded account pictures.
+	//
+	// Held here rather than in the account's own directory: anything placed
+	// there is a file the account owns and syncs to every device, and a picture
+	// the admin page put there would look to the person like something Mirage
+	// had dumped in their files. One small row per account instead.
+	`
+CREATE TABLE avatars (
+    user_id    INTEGER NOT NULL PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    image      BLOB    NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+`,
 }
 
 // migrate applies any migrations the database has not yet seen.
