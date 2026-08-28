@@ -9,6 +9,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -20,6 +21,10 @@ import (
 type DB struct {
 	*sql.DB
 	path string
+	// log reports the few things the store has to say for itself, which is
+	// currently only that a slow migration is in progress. Defaulted rather
+	// than injected so that every caller does not have to pass one.
+	log *slog.Logger
 }
 
 // Open opens (creating if needed) the index database at path and brings its
@@ -49,7 +54,7 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		return nil, fmt.Errorf("open database %s: %w", path, err)
 	}
 
-	db := &DB{DB: sqlDB, path: path}
+	db := &DB{DB: sqlDB, path: path, log: slog.Default()}
 	if err := db.migrate(ctx); err != nil {
 		sqlDB.Close()
 		return nil, fmt.Errorf("migrate database: %w", err)

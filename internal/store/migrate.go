@@ -179,6 +179,50 @@ CREATE TABLE avatars (
     updated_at INTEGER NOT NULL
 );
 `,
+	// 8: make searching by name find things without reading every row.
+	//
+	// A search box sends "contains this text", which is LIKE '%x%', and no
+	// ordinary index can serve that - so every search read the whole account.
+	// On a share of three million files that took seconds, and all of them
+	// spent on the rows that do not match.
+	//
+	// A trigram index turns the problem around: it indexes every three-letter
+	// run, so a substring becomes something that can be looked up. The table is
+	// contentless - it stores the index but not another copy of the names - and
+	// so answers MATCH only. A contentless table silently returns nothing for
+	// LIKE, which is why the query treats MATCH as a way to narrow the
+	// candidates and then checks them against the real column.
+	//
+	// Kept current by triggers rather than by the code that writes nodes. Nodes
+	// are written from a dozen places and a search index that is only usually
+	// updated gives wrong answers quietly, which is the worst way to be wrong.
+	`
+CREATE VIRTUAL TABLE node_names USING fts5(
+    name,
+    content='',
+    contentless_delete=1,
+    tokenize='trigram'
+);
+
+CREATE TRIGGER nodes_search_insert AFTER INSERT ON nodes BEGIN
+    INSERT INTO node_names(rowid, name) VALUES (new.id, new.name);
+END;
+
+CREATE TRIGGER nodes_search_delete AFTER DELETE ON nodes BEGIN
+    DELETE FROM node_names WHERE rowid = old.id;
+END;
+
+-- Guarded on the name actually changing. A rescan rewrites every row it
+-- visits, and reindexing three million unchanged names on each pass would
+-- cost far more than it is worth.
+CREATE TRIGGER nodes_search_update AFTER UPDATE OF name ON nodes
+WHEN old.name <> new.name BEGIN
+    DELETE FROM node_names WHERE rowid = old.id;
+    INSERT INTO node_names(rowid, name) VALUES (new.id, new.name);
+END;
+
+INSERT INTO node_names(rowid, name) SELECT id, name FROM nodes;
+`,
 }
 
 // migrate applies any migrations the database has not yet seen.
@@ -201,10 +245,24 @@ func (db *DB) migrate(ctx context.Context) error {
 			current, len(migrations))
 	}
 
+	// Announced before it starts, not after. Most migrations are instant, but
+	// one builds a search index over every indexed file, which on a large share
+	// takes minutes - and a server that goes quiet during an upgrade is one
+	// somebody restarts halfway through.
+	if current < len(migrations) && db.log != nil {
+		db.log.Info("bringing the index database up to date",
+			"from_version", current, "to_version", len(migrations),
+			"note", "a large share can take several minutes; do not interrupt it")
+	}
 	for i := current; i < len(migrations); i++ {
 		version := i + 1
+		start := time.Now()
 		if err := db.applyMigration(ctx, version, migrations[i]); err != nil {
 			return fmt.Errorf("apply migration %d: %w", version, err)
+		}
+		if elapsed := time.Since(start); elapsed > time.Second && db.log != nil {
+			db.log.Info("applied a database migration",
+				"version", version, "duration", elapsed.Round(time.Millisecond))
 		}
 	}
 	return nil

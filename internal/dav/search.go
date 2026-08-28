@@ -63,6 +63,11 @@ var propRe = regexp.MustCompile(`<(?:\w+:)?(displayname|getcontenttype|getlastmo
 // backtrack, and no real search box produces one.
 const maxPatternLen = 256
 
+// Searching by name is served by a trigram index, so a term of three
+// characters or more is found without reading the account. A shorter one has
+// no index entry to look up and falls back to reading every row - correct, but
+// slow on a large share.
+
 // handleSearch answers a WebDAV SEARCH.
 func (h *Handler) handleSearch(w http.ResponseWriter, r *http.Request) {
 	user := auth.MustUser(r.Context())
