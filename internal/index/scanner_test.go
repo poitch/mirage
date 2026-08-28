@@ -788,3 +788,35 @@ func TestQuickScanMissesInPlaceEdits(t *testing.T) {
 		t.Error("the full scan also missed an in-place edit")
 	}
 }
+
+// TestStartupScanIsQuickWhenAlreadyIndexed: a restart must not cost a walk of
+// the whole share, or restarting becomes something to avoid - and a server
+// nobody dares restart is a worse problem than a slightly stale index.
+func TestStartupScanIsQuickWhenAlreadyIndexed(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+
+	// Nothing indexed yet, so there is nothing to compare against and the full
+	// walk is the only option.
+	if err := f.scanner.StartupScan(ctx); err != nil {
+		t.Fatalf("StartupScan on an empty index: %v", err)
+	}
+	if _, err := store.NodeByPath(ctx, f.db, f.user.ID, "docs/nested/deep.txt"); err != nil {
+		t.Fatalf("the first startup scan did not index the tree: %v", err)
+	}
+
+	// Something appears while the server is "down" - which is what a restart
+	// has to catch, and what a quick pass can see.
+	mustWrite(t, filepath.Join(f.home, "docs", "arrived-while-down.txt"), "new")
+	rootBefore := f.node(t, ".").ETag
+
+	if err := f.scanner.StartupScan(ctx); err != nil {
+		t.Fatalf("StartupScan: %v", err)
+	}
+	if _, err := store.NodeByPath(ctx, f.db, f.user.ID, "docs/arrived-while-down.txt"); err != nil {
+		t.Errorf("a restart did not pick up a file added while the server was down: %v", err)
+	}
+	if f.node(t, ".").ETag == rootBefore {
+		t.Error("the change did not reach the root ETag, so clients would not see it")
+	}
+}

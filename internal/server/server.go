@@ -285,8 +285,10 @@ func (s *Server) rescan(ctx context.Context) {
 			"last_at", p.Current)
 	}
 
-	if err := s.scanner.ScanAll(ctx, "server started"); err != nil && !errors.Is(err, context.Canceled) {
-		s.log.Error("initial scan failed", "error", err)
+	// A quick pass for accounts that already have an index, a full one for
+	// those that do not. A restart should not cost a walk of the whole share.
+	if err := s.scanner.StartupScan(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		s.log.Error("startup scan failed", "error", err)
 	}
 
 	if s.cfg.Storage.RescanInterval.Duration() <= 0 {

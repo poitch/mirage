@@ -550,6 +550,60 @@ func (s *Scanner) QuickScanAll(ctx context.Context, reason string) error {
 	return s.scanAll(ctx, reason, true)
 }
 
+// StartupScan catches up with whatever changed while the server was not
+// running, choosing the cheapest pass that can see it.
+//
+// An account with no index needs a full walk, because there is nothing to
+// compare against. An account that already has one does not: what happens to a
+// share while a server is down is files appearing, disappearing and being
+// renamed, and a quick pass sees all three. Making every restart pay for a full
+// walk of a few million files means a restart costs an hour of disk, which is
+// enough to discourage restarting at all - and a server nobody dares restart is
+// a worse problem than a slightly stale index.
+//
+// The full walk still runs, on its own interval, and remains the only thing
+// that sees a file rewritten in place.
+func (s *Scanner) StartupScan(ctx context.Context) error {
+	users, err := s.db.ListUsers(ctx)
+	if err != nil {
+		return fmt.Errorf("list users: %w", err)
+	}
+	for _, u := range users {
+		if u.Disabled {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		indexed, err := store.CountNodes(ctx, s.db, u.ID)
+		if err != nil {
+			return fmt.Errorf("count indexed entries for %s: %w", u.Username, err)
+		}
+		if indexed == 0 {
+			s.log.Info("scan starting", "kind", "full", "reason", "first scan for this account",
+				"user", u.Username)
+			if _, err := s.ScanUser(ctx, u); err != nil {
+				if errors.Is(err, context.Canceled) {
+					return err
+				}
+				s.log.Error("scan failed", "user", u.Username, "error", err)
+			}
+			continue
+		}
+
+		s.log.Info("scan starting", "kind", "quick", "reason", "server started",
+			"user", u.Username, "indexed", indexed)
+		if _, err := s.QuickScanUser(ctx, u); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return err
+			}
+			s.log.Error("quick scan failed", "user", u.Username, "error", err)
+		}
+	}
+	return nil
+}
+
 func (s *Scanner) scanAll(ctx context.Context, reason string, quick bool) error {
 	users, err := s.db.ListUsers(ctx)
 	if err != nil {
