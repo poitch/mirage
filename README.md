@@ -32,9 +32,21 @@ Early development. Milestone progress:
 - [x] **M4** — chunked upload for large files
 - [x] **M5** — out-of-band changes: watcher, rescan, rename detection
 - [x] **M6** — instant sync via notify_push
-- [x] search by filename, account pictures
+- [x] search by filename, account pictures, a browse-and-download web view
 - [ ] **M7** — trashbin, versions, previews
 - [ ] **M8** — quotas, rate limiting, hardening
+
+## The web view
+
+There is a small browser view at `/web/`, and account holders sign in to it with
+their own Mirage credentials. It browses folders and downloads files, and that
+is all it does &mdash; Mirage is a sync server, and the clients are how you work
+with your files.
+
+It exists because a search result has to lead somewhere. Clicking one in the
+desktop client normally opens the file locally without involving the server at
+all; when the client cannot do that, it opens a browser at the folder, and this
+is what it finds.
 
 ## Accounts
 

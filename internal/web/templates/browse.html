@@ -1,0 +1,39 @@
+{{ template "head" . }}
+{{ template "nav" . }}
+<main>
+  <p class="crumbs">
+    {{ range .Crumbs }}
+      {{ if .Current }}<span class="here">{{ .Name }}</span>
+      {{ else }}<a href="{{ .URL }}">{{ .Name }}</a><span class="sep">/</span>{{ end }}
+    {{ end }}
+  </p>
+
+  <div class="card">
+    {{ if .Entries }}
+    <table>
+      <thead>
+        <tr><th>Name</th><th class="size">Size</th><th class="when">Modified</th></tr>
+      </thead>
+      <tbody>
+        {{ range .Entries }}
+        <tr {{ if .Highlight }}class="hit" id="hit"{{ end }}>
+          <td>
+            <span class="icon">{{ if .IsDir }}&#128193;{{ else }}&#128196;{{ end }}</span>
+            <a href="{{ .URL }}"{{ if not .IsDir }} download{{ end }}>{{ .Name }}</a>
+          </td>
+          <td class="size">{{ if .IsDir }}&mdash;{{ else }}{{ .Size }}{{ end }}</td>
+          <td class="when">{{ .Modified }}</td>
+        </tr>
+        {{ end }}
+      </tbody>
+    </table>
+    {{ else }}
+    <p class="empty">This folder is empty.</p>
+    {{ end }}
+  </div>
+
+  <p class="note">
+    Mirage is a sync server. This page browses and downloads; to work with your
+    files, use the Nextcloud client.
+  </p>
+</main>

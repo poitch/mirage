@@ -1,0 +1,78 @@
+{{ define "head" }}
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>{{ .Title }} &middot; Mirage</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f4f5f7; --card: #fff; --fg: #1c1e21; --muted: #61656c;
+    --line: #d9dce1; --accent: #3b6ef5; --accent-fg: #fff;
+    --err: #a12222; --err-bg: #fdeaea; --err-line: #f0b4b4;
+    --hit: #fff6d6; --hit-line: #e8cf7a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16181c; --card: #1e2126; --fg: #e8eaed; --muted: #9aa0a8;
+      --line: #31353c; --accent: #5b86f7; --accent-fg: #0d1015;
+      --err: #ef8a8a; --err-bg: #2e1616; --err-line: #4d2020;
+      --hit: #33301c; --hit-line: #5c542a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: var(--bg); color: var(--fg);
+    font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    border-bottom: 1px solid var(--line); background: var(--card);
+    padding: .85rem 1.25rem; display: flex; align-items: center; gap: 1rem;
+  }
+  header .brand { font-weight: 650; letter-spacing: -.01em; }
+  header .spacer { flex: 1; }
+  header .who { color: var(--muted); font-size: .9rem; }
+  main { max-width: 60rem; margin: 0 auto; padding: 1.4rem 1.25rem 3rem; }
+  a { color: var(--accent); }
+  .crumbs { font-size: .95rem; margin: 0 0 1rem; word-break: break-word; }
+  .crumbs a { text-decoration: none; }
+  .crumbs a:hover { text-decoration: underline; }
+  .crumbs .sep { color: var(--muted); padding: 0 .35rem; }
+  .crumbs .here { color: var(--muted); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: .6rem .85rem; border-bottom: 1px solid var(--line); }
+  th { font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); font-weight: 600; }
+  tr:last-child td { border-bottom: 0; }
+  tr.hit td { background: var(--hit); }
+  tr.hit td:first-child { box-shadow: inset 3px 0 0 var(--hit-line); }
+  td.size, th.size { text-align: right; white-space: nowrap; color: var(--muted); font-variant-numeric: tabular-nums; }
+  td.when, th.when { white-space: nowrap; color: var(--muted); font-size: .88rem; }
+  @media (max-width: 34rem) { td.when, th.when { display: none; } }
+  td a { text-decoration: none; }
+  td a:hover { text-decoration: underline; }
+  .icon { display: inline-block; width: 1.1rem; color: var(--muted); }
+  .empty { padding: 2rem .85rem; text-align: center; color: var(--muted); font-size: .92rem; }
+  .note { color: var(--muted); font-size: .88rem; margin: 1rem 0 0; }
+  form.inline { display: inline; }
+  button.link {
+    background: none; border: 0; padding: 0; font: inherit; font-size: .9rem;
+    color: var(--muted); cursor: pointer;
+  }
+  button.link:hover { color: var(--fg); text-decoration: underline; }
+  .banner { padding: .7rem .85rem; border-radius: 8px; font-size: .88rem; margin-bottom: 1rem;
+            border: 1px solid var(--err-line); background: var(--err-bg); color: var(--err); }
+</style>
+{{ end }}
+
+{{ define "nav" }}
+<header>
+  <span class="brand">Mirage</span>
+  <span class="spacer"></span>
+  <span class="who">{{ .Username }}</span>
+  <form class="inline" method="post" action="/web/logout">
+    <input type="hidden" name="csrf" value="{{ .CSRF }}">
+    <button class="link" type="submit">Sign out</button>
+  </form>
+</header>
+{{ end }}

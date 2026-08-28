@@ -50,6 +50,9 @@ type Admin struct {
 	log      *slog.Logger
 	tmpl     *template.Template
 	sessions *sessionStore
+	// credentialsChanged is told when an account's password changes or it is
+	// disabled, so that sessions held elsewhere can be ended.
+	credentialsChanged func(userID int64)
 
 	username    string
 	password    string
@@ -126,6 +129,21 @@ func (ad *Admin) Routes(mux *http.ServeMux) {
 // maxAdminBody caps an admin form submission. Everything here is a handful of
 // fields except the account picture, which sets the size.
 const maxAdminBody = avatar.MaxUploadBytes + (1 << 20)
+
+// OnCredentialsChanged registers a callback for when an account's password
+// changes or it is disabled here.
+//
+// The browser view holds its own sessions, and a password changed on this page
+// has to end them. It is a callback rather than a direct reference because the
+// admin page has no business knowing what else exists.
+func (ad *Admin) OnCredentialsChanged(f func(userID int64)) { ad.credentialsChanged = f }
+
+// credentialsChangedFor runs the hook, if one is registered.
+func (ad *Admin) credentialsChangedFor(userID int64) {
+	if ad.credentialsChanged != nil {
+		ad.credentialsChanged(userID)
+	}
+}
 
 // guard requires a live session, and a matching CSRF token on writes.
 func (ad *Admin) guard(h func(http.ResponseWriter, *http.Request, *session)) http.Handler {
@@ -402,6 +420,7 @@ func (ad *Admin) setPassword(w http.ResponseWriter, r *http.Request, sess *sessi
 		return
 	}
 	ad.auth.Forget(u.Username)
+	ad.credentialsChangedFor(u.ID)
 	ad.log.Info("account password changed from the admin page", "user", u.Username)
 	ad.redirectWithNotice(w, r, u.ID, "Password updated.")
 }
@@ -415,6 +434,9 @@ func (ad *Admin) setState(w http.ResponseWriter, r *http.Request, sess *session)
 	if err := ad.db.SetDisabled(r.Context(), u.ID, disable); err != nil {
 		ad.internalError(w, "change account state", err)
 		return
+	}
+	if disable {
+		ad.credentialsChangedFor(u.ID)
 	}
 	// Existing sessions and cached credentials must stop working at once, or
 	// disabling a compromised account would not take effect until they expire.

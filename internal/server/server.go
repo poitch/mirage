@@ -18,6 +18,7 @@ import (
 	"github.com/poitch/mirage/internal/ocs"
 	"github.com/poitch/mirage/internal/push"
 	"github.com/poitch/mirage/internal/store"
+	"github.com/poitch/mirage/internal/web"
 )
 
 // pairingPruneInterval is how often expired pairing sessions are swept.
@@ -38,6 +39,7 @@ type Server struct {
 	uploads   *dav.UploadHandler
 	push      *push.Hub
 	admin     *admin.Admin
+	web       *web.Site
 	http      *http.Server
 }
 
@@ -106,8 +108,19 @@ func New(ctx context.Context, cfg *config.Config, db *store.DB, log *slog.Logger
 		}
 	}
 
+	site, err := web.New(db, authenticator, storage, cfg.Server.ExternalURL, log)
+	if err != nil {
+		return nil, fmt.Errorf("build the web view: %w", err)
+	}
+
+	// A password changed or an account disabled on the admin page has to end
+	// that account's browser sessions too.
+	if adminPage != nil {
+		adminPage.OnCredentialsChanged(site.ForgetSessions)
+	}
+
 	s := &Server{
-		cfg: cfg, db: db, log: log,
+		cfg: cfg, db: db, log: log, web: site,
 		auth: authenticator, loginFlow: loginFlow, ocs: ocsService,
 		storage: storage, scanner: scanner, watcher: watcher,
 		dav: davHandler, uploads: uploadHandler, push: pushHub, admin: adminPage,
@@ -197,12 +210,11 @@ func (s *Server) routes() http.Handler {
 		mux.Handle("GET "+v.prefix+"/search/providers/{providerId}/search",
 			protected(s.ocs.Search(v.version)))
 	}
-	// Where a search result points. The desktop client reads the folder out of
-	// this URL and opens it in the file manager without ever fetching it; the
-	// page is only reached when that folder is not synced on the device, so it
-	// explains where the file is rather than pretending to be a file manager.
-	// Unauthenticated: it shows only what the caller put in the query string.
-	mux.HandleFunc("GET "+ocs.FilesAppPath, s.ocs.FilesPage)
+	// The browser view. Search results land here when a client cannot open the
+	// file locally, which on macOS under the File Provider integration is
+	// always: that mode registers no classic sync folders, so the client's
+	// lookup has nothing to search and it opens a browser instead.
+	s.web.Routes(mux)
 	mux.Handle("GET /index.php/f/{fileid}", protected(http.HandlerFunc(s.ocs.OpenFile)))
 
 	// notify_push. The websocket is not behind the Basic auth middleware: the

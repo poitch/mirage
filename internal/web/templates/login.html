@@ -1,0 +1,34 @@
+{{ template "head" . }}
+<style>
+  body { display: grid; place-items: center; padding: 1.5rem; }
+  main { width: 100%; max-width: 22rem; }
+  .card { padding: 1.6rem 1.5rem; }
+  h1 { margin: 0 0 .2rem; font-size: 1.2rem; }
+  p.sub { margin: 0 0 1.2rem; color: var(--muted); font-size: .9rem; }
+  label { display: block; font-size: .82rem; font-weight: 600; margin: .8rem 0 .3rem; }
+  input {
+    width: 100%; padding: .55rem .7rem; font: inherit; color: var(--fg);
+    background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+  }
+  button[type=submit] {
+    width: 100%; margin-top: 1.2rem; padding: .6rem; font: inherit; font-weight: 600;
+    cursor: pointer; color: var(--accent-fg); background: var(--accent);
+    border: 0; border-radius: 8px;
+  }
+</style>
+<main>
+  <div class="card">
+    <h1>Sign in</h1>
+    <p class="sub">Use your Mirage account, the same one your sync client uses.</p>
+    {{ if .Error }}<p class="banner">{{ .Error }}</p>{{ end }}
+    <form method="post" action="/web/login">
+      <input type="hidden" name="next" value="{{ .Next }}">
+      <label for="username">Username</label>
+      <input id="username" name="username" autocapitalize="none" autocorrect="off"
+             spellcheck="false" autocomplete="username" required autofocus>
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <button type="submit">Sign in</button>
+    </form>
+  </div>
+</main>
