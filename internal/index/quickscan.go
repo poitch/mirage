@@ -81,11 +81,33 @@ func (s *Scanner) QuickScanUser(ctx context.Context, user store.User) (Stats, er
 	}
 
 	changed = dedupe(changed)
-	// Deepest first, so a directory's children are settled before the ETags
-	// above it are derived from them.
-	sort.Slice(changed, func(i, j int) bool { return depth(changed[i]) > depth(changed[j]) })
 
+	// Directories that still exist are settled before ones that have gone.
+	//
+	// A renamed directory appears in this list twice over: once as the old path,
+	// which is now missing, and once as its parent, whose timestamp moved.
+	// Handling the missing one first deletes the subtree from the index, and the
+	// rename can then never be recognised - the entry it would have matched is
+	// already gone. Settling the parent first lets the rename be seen, after
+	// which the old path is no longer indexed and there is nothing to delete.
+	present := make([]string, 0, len(changed))
+	missing := make([]string, 0, len(changed))
 	for _, dirPath := range changed {
+		if _, err := st.Stat(dirPath); err == nil {
+			present = append(present, dirPath)
+			continue
+		}
+		missing = append(missing, dirPath)
+	}
+	// Within each group, deepest first, so a directory's children are settled
+	// before the ETags above it are derived from them.
+	byDepth := func(paths []string) {
+		sort.Slice(paths, func(i, j int) bool { return depth(paths[i]) > depth(paths[j]) })
+	}
+	byDepth(present)
+	byDepth(missing)
+
+	for _, dirPath := range append(present, missing...) {
 		if err := ctx.Err(); err != nil {
 			return stats, err
 		}
@@ -165,6 +187,21 @@ func (s *Scanner) refreshDirectory(ctx context.Context, st *fsx.Storage, user st
 		if entry.IsDir() {
 			prev, ok := known[name]
 			if !ok {
+				// A directory that is new here may be one that moved. Carrying
+				// its entry across takes the whole subtree with it, so the scan
+				// that follows finds everything already in place.
+				if info, err := entry.Info(); err == nil {
+					if moved, err := s.detectDirRename(ctx, st, user, childPath, info); err != nil {
+						return err
+					} else if moved {
+						stats.Moved++
+						if carried, err := store.NodeByPath(ctx, s.db, user.ID, childPath); err == nil {
+							digests = append(digests, ChildDigest{Name: name, ETag: carried.ETag})
+							total += carried.Size
+							continue
+						}
+					}
+				}
 				// Never seen before, so nothing else will look inside it.
 				newSubdirs = append(newSubdirs, childPath)
 				continue

@@ -35,7 +35,9 @@ func (s *Scanner) SetNotifier(n Notifier) { s.notifier = n }
 
 // NewScanner builds a Scanner.
 func NewScanner(db *store.DB, storage *fsx.Manager, log *slog.Logger) *Scanner {
-	return &Scanner{db: db, storage: storage, log: log, updater: NewUpdater(db)}
+	u := NewUpdater(db)
+	u.SetStorage(storage)
+	return &Scanner{db: db, storage: storage, log: log, updater: u}
 }
 
 // Stats summarises one scan.
@@ -206,10 +208,20 @@ func (s *Scanner) scanDir(ctx context.Context, run *scanRun,
 		name = ""
 	}
 
+	// Checked before the row is created, since creating it would make the
+	// directory look like one that had always been here.
+	if run.detectRenames && !fsx.IsRoot(dirPath) {
+		if moved, err := s.detectDirRename(ctx, st, user, dirPath, info); err != nil {
+			return "", 0, err
+		} else if moved {
+			stats.Moved++
+		}
+	}
+
 	// Seeded from the directory's own metadata so that a client reading this
 	// row before the scan reaches the end of it sees something sensible.
 	dirID, err := store.EnsureDirNode(ctx, s.db, user.ID, parentID, dirPath, name,
-		info.ModTime(), FileETag(0, info.ModTime()), stamp)
+		info.ModTime(), FileETag(0, info.ModTime()), devOf(info), inodeOf(info), stamp)
 	if err != nil {
 		return "", 0, fmt.Errorf("index directory %s: %w", dirPath, err)
 	}
@@ -482,6 +494,58 @@ func (s *Scanner) sweepSubtree(ctx context.Context, user store.User, target stri
 	return err
 }
 
+// detectDirRename carries a directory's index entry across a rename, along with
+// every path beneath it.
+//
+// Without this a renamed directory is indexed as a new one and the old is
+// swept, so a client sees a folder deleted and another created - and for a
+// large folder that means discarding and re-fetching all of it. Because the
+// move rewrites the paths of everything underneath, the subtree that follows
+// also costs nothing: the scan finds it already where it expects.
+func (s *Scanner) detectDirRename(ctx context.Context, st *fsx.Storage, user store.User,
+	newPath string, info fs.FileInfo) (bool, error) {
+
+	if _, err := store.NodeByPath(ctx, s.db, user.ID, newPath); err == nil {
+		return false, nil // already indexed here; nothing moved
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return false, err
+	}
+
+	dev, inode, ok := fsx.Identity(info)
+	if !ok || inode == 0 {
+		return false, nil
+	}
+	previous, err := store.NodeByInode(ctx, s.db, user.ID, dev, inode, true)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if previous.Path == newPath || fsx.IsRoot(previous.Path) {
+		return false, nil
+	}
+	// If the old path still exists this is not a move. A directory cannot be
+	// hard-linked, but a filesystem that recycles inode numbers could otherwise
+	// hand one directory another's identity.
+	if _, err := st.Stat(previous.Path); err == nil {
+		return false, nil
+	}
+
+	unlock := indexLocks.lock(user.ID)
+	defer unlock()
+	parent, err := store.NodeByPath(ctx, s.db, user.ID, parentDir(newPath))
+	if err != nil {
+		return false, nil //nolint:nilerr // parent not indexed yet; treat as new
+	}
+	if err := store.MoveNode(ctx, s.db, user.ID, previous.Path, newPath, parent.ID, path.Base(newPath)); err != nil {
+		return false, fmt.Errorf("carry directory across rename: %w", err)
+	}
+	s.log.Debug("recognised a directory rename",
+		"user", user.Username, "from", previous.Path, "to", newPath, "fileid", previous.ID)
+	return true, nil
+}
+
 // detectRename checks whether a file that is new at this path is really one
 // that moved, and if so carries its index entry - and its file ID - across.
 //
@@ -497,7 +561,7 @@ func (s *Scanner) detectRename(ctx context.Context, st *fsx.Storage, user store.
 	if !ok || inode == 0 {
 		return false, nil
 	}
-	previous, err := store.NodeByInode(ctx, s.db, user.ID, dev, inode)
+	previous, err := store.NodeByInode(ctx, s.db, user.ID, dev, inode, false)
 	if errors.Is(err, store.ErrNotFound) {
 		return false, nil
 	}

@@ -260,15 +260,15 @@ func CountNodes(ctx context.Context, q Querier, userID int64) (int64, error) {
 // leaves exactly that, and without the repair those rows would keep reporting
 // 1970 and an empty ETag until some future scan happened to complete.
 func EnsureDirNode(ctx context.Context, q Querier, userID, parentID int64, path, name string,
-	mtime time.Time, provisionalETag string, stamp int64) (int64, error) {
+	mtime time.Time, provisionalETag string, dev, inode uint64, stamp int64) (int64, error) {
 	var parent any
 	if parentID != 0 {
 		parent = parentID
 	}
 	var id int64
 	err := q.QueryRowContext(ctx, `
-		INSERT INTO nodes (user_id, parent_id, path, name, is_dir, mtime, etag, scanned_at)
-		VALUES (?, ?, ?, ?, 1, ?, ?, ?)
+		INSERT INTO nodes (user_id, parent_id, path, name, is_dir, mtime, etag, dev, inode, scanned_at)
+		VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
 		ON CONFLICT(user_id, path) DO UPDATE SET
 			parent_id  = excluded.parent_id,
 			name       = excluded.name,
@@ -278,9 +278,13 @@ func EnsureDirNode(ctx context.Context, q Querier, userID, parentID int64, path,
 			-- Reading a directory again means its contents are being re-read,
 			-- so it is no longer known-complete until finalised once more.
 			complete   = 0,
+			-- Recorded so that a directory carried across a rename can be
+			-- recognised by its filesystem identity, exactly as a file is.
+			dev        = excluded.dev,
+			inode      = excluded.inode,
 			scanned_at = excluded.scanned_at
 		RETURNING id`,
-		userID, parent, path, name, mtime.Unix(), provisionalETag, stamp).Scan(&id)
+		userID, parent, path, name, mtime.Unix(), provisionalETag, dev, inode, stamp).Scan(&id)
 	return id, err
 }
 
@@ -299,17 +303,20 @@ func FinalizeDirNode(ctx context.Context, q Querier, id int64, etag string, size
 // NodeByInode finds an indexed entry by its filesystem identity.
 //
 // This is how an out-of-band rename is told apart from a delete plus a create:
-// the same (dev, inode) appearing at a new path means the file moved, and its
+// the same (dev, inode) appearing at a new path means the entry moved, and its
 // file ID should follow it.
-func NodeByInode(ctx context.Context, q Querier, userID int64, dev, inode uint64) (Node, error) {
+//
+// isDir selects which kind to look for, because the two are asked about at
+// different moments and matching a directory against a file would be wrong.
+func NodeByInode(ctx context.Context, q Querier, userID int64, dev, inode uint64, isDir bool) (Node, error) {
 	if inode == 0 {
 		// Filesystems that report no inode cannot support this.
 		return Node{}, ErrNotFound
 	}
 	return scanNode(q.QueryRowContext(ctx,
 		`SELECT `+nodeColumns+` FROM nodes
-		 WHERE user_id = ? AND dev = ? AND inode = ? AND is_dir = 0
-		 LIMIT 1`, userID, dev, inode))
+		 WHERE user_id = ? AND dev = ? AND inode = ? AND is_dir = ?
+		 LIMIT 1`, userID, dev, inode, isDir))
 }
 
 // MarkSubtreeScanned stamps a directory and everything beneath it as seen.

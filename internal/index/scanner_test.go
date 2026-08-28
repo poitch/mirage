@@ -820,3 +820,71 @@ func TestStartupScanIsQuickWhenAlreadyIndexed(t *testing.T) {
 		t.Error("the change did not reach the root ETag, so clients would not see it")
 	}
 }
+
+// TestDirectoryRenameKeepsIDs covers what renaming a folder over SMB costs. A
+// directory's entry has to travel with it, and so do the entries beneath it -
+// otherwise a client sees one folder deleted and another created, and for a
+// large folder that means discarding and re-fetching all of it.
+func TestDirectoryRenameKeepsIDs(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	f.scan(t)
+
+	dirBefore := f.node(t, "docs").ID
+	nestedBefore := f.node(t, "docs/nested").ID
+	fileBefore := f.node(t, "docs/nested/deep.txt").ID
+
+	if err := os.Rename(filepath.Join(f.home, "docs"), filepath.Join(f.home, "archive")); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	stats := f.scan(t)
+	if stats.Moved == 0 {
+		t.Error("the rename was not recognised as one")
+	}
+
+	if got := f.node(t, "archive").ID; got != dirBefore {
+		t.Errorf("directory id changed: %d then %d", dirBefore, got)
+	}
+	if got := f.node(t, "archive/nested").ID; got != nestedBefore {
+		t.Errorf("nested directory id changed: %d then %d", nestedBefore, got)
+	}
+	if got := f.node(t, "archive/nested/deep.txt").ID; got != fileBefore {
+		t.Errorf("file id inside the renamed directory changed: %d then %d", fileBefore, got)
+	}
+	if _, err := store.NodeByPath(ctx, f.db, f.user.ID, "docs"); err == nil {
+		t.Error("the old path is still indexed")
+	}
+}
+
+// TestQuickScanKeepsIDsOnDirectoryRename: the quick pass is what actually sees
+// a rename made over SMB, so it needs the same behaviour as the full scan.
+func TestQuickScanKeepsIDsOnDirectoryRename(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	f.scan(t)
+
+	dirBefore := f.node(t, "docs").ID
+	fileBefore := f.node(t, "docs/nested/deep.txt").ID
+
+	if err := os.Rename(filepath.Join(f.home, "docs"), filepath.Join(f.home, "archive")); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if _, err := f.scanner.QuickScanUser(ctx, f.user); err != nil {
+		t.Fatalf("QuickScanUser: %v", err)
+	}
+
+	after, err := store.NodeByPath(ctx, f.db, f.user.ID, "archive")
+	if err != nil {
+		t.Fatalf("renamed directory not indexed: %v", err)
+	}
+	if after.ID != dirBefore {
+		t.Errorf("directory id changed: %d then %d", dirBefore, after.ID)
+	}
+	file, err := store.NodeByPath(ctx, f.db, f.user.ID, "archive/nested/deep.txt")
+	if err != nil {
+		t.Fatalf("file inside renamed directory not indexed: %v", err)
+	}
+	if file.ID != fileBefore {
+		t.Errorf("file id changed: %d then %d", fileBefore, file.ID)
+	}
+}

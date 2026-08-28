@@ -37,6 +37,7 @@ type Notifier interface {
 // server itself performs.
 type Updater struct {
 	db       *store.DB
+	storage  *fsx.Manager
 	notifier Notifier
 }
 
@@ -44,6 +45,10 @@ type Updater struct {
 func NewUpdater(db *store.DB) *Updater {
 	return &Updater{db: db}
 }
+
+// SetStorage lets the updater read back filesystem identity for directories it
+// creates, which is what allows a later rename to be recognised as one.
+func (u *Updater) SetStorage(m *fsx.Manager) { u.storage = m }
 
 // SetNotifier attaches a change notifier. Passing nil disables notification.
 func (u *Updater) SetNotifier(n Notifier) { u.notifier = n }
@@ -107,8 +112,17 @@ func (u *Updater) DirCreated(ctx context.Context, user store.User, dirPath strin
 			return err
 		}
 		now := time.Now()
+		// The directory was just created here, so its filesystem identity is
+		// read back rather than guessed; it is what lets a later rename be
+		// recognised as one.
+		var dev, inode uint64
+		if st, err := u.storage.For(user.ID, user.Home, user.UID, user.GID); err == nil {
+			if info, err := st.Stat(dirPath); err == nil {
+				dev, inode = devOf(info), inodeOf(info)
+			}
+		}
 		id, err := store.EnsureDirNode(ctx, tx, user.ID, parent.ID, dirPath, path.Base(dirPath),
-			now, DirETag(nil), store.Stamp())
+			now, DirETag(nil), dev, inode, store.Stamp())
 		if err != nil {
 			return err
 		}
