@@ -151,10 +151,6 @@ var messages = map[string]map[lang]string{
 
 	// The landing page.
 	"landing.title": {langEN: "Set up", langFR: "Configuration"},
-	"landing.lead": {
-		langEN: "Your files, on this server, kept in step with every device you use. Three steps and you are done.",
-		langFR: "Vos fichiers, sur ce serveur, synchronisés avec tous vos appareils. Trois étapes et c’est fait.",
-	},
 	"landing.step1": {langEN: "Install the Nextcloud app", langFR: "Installez l’application Nextcloud"},
 	"landing.step1.desc": {
 		langEN: "Mirage speaks the Nextcloud protocol, so its app is the one to use.",

@@ -58,7 +58,7 @@ func TestPagesAreTranslated(t *testing.T) {
 	french := map[string]string{"Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8"}
 
 	_, landing := h.getWithHeaders(t, "/", french)
-	for _, want := range []string{"Vos fichiers", "Installez l", "Indiquez-lui cette adresse"} {
+	for _, want := range []string{"Installez l", "Indiquez-lui cette adresse", "Connectez-vous"} {
 		if !strings.Contains(landing, want) {
 			t.Errorf("the landing page is not in French; missing %q", want)
 		}
