@@ -75,6 +75,14 @@ const tempPrefix = ".mirage-tmp-"
 // keeps one tenant's uploads inside their own directory like everything else.
 const UploadDir = ".mirage-uploads"
 
+// TrashDir holds deleted files until they are restored or expire.
+//
+// Inside the account's own directory, because a delete has to be a rename and a
+// rename only works within one filesystem. That it is hidden from the index is
+// not cosmetic: an indexed trash directory would sync every deleted file back
+// to every device as a new file, which is the opposite of deleting it.
+const TrashDir = ".mirage-trash"
+
 // ignoredNames are entries that exist on the filesystem but are not the user's
 // files, and must not be indexed or shown to clients.
 //
@@ -95,7 +103,8 @@ var ignoredNames = map[string]bool{
 // and the index, either because it is Mirage's own bookkeeping or because it is
 // filesystem machinery that is not the user's data.
 func IsInternal(name string) bool {
-	return strings.HasPrefix(name, tempPrefix) || name == UploadDir || ignoredNames[name]
+	return strings.HasPrefix(name, tempPrefix) ||
+		name == UploadDir || name == TrashDir || ignoredNames[name]
 }
 
 // Excluder decides whether an entry is excluded by operator configuration.

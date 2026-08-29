@@ -149,3 +149,21 @@ preview:
   # leaves its old previews unreachable rather than deleted, so without this the
   # cache only grows. Zero keeps them forever.
   max_age: 2160h
+
+# What happens when a file is deleted from a client.
+#
+# With this on, a delete is a rename into a hidden directory inside the
+# account rather than an unlink, so somebody who deletes the wrong thing can
+# get it back. It has to live inside the account because a rename only works
+# within one filesystem - which means trashed files still occupy that person's
+# disk until they expire.
+#
+# Note that a delete made over SMB does not come here: DSM's own #recycle
+# handles those, on its own schedule.
+trash:
+  enabled: true
+
+  # How long a deleted file is kept. This is the knob that decides how much
+  # disk the trash costs.
+  retention: 720h
+

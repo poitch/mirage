@@ -85,6 +85,9 @@ func New(ctx context.Context, cfg *config.Config, db *store.DB, log *slog.Logger
 
 	const readOnly = false
 	davHandler := dav.NewHandler(db, storage, updater, scanner, log, instanceID, readOnly)
+	if cfg.Trash.Enabled {
+		davHandler.SetTrashRetention(cfg.Trash.Retention.Duration())
+	}
 	uploadHandler := dav.NewUploadHandler(db, storage, updater, log, instanceID)
 
 	loginFlow, err := auth.NewLoginFlow(db, authenticator, cfg.Server.ExternalURL, log)
@@ -95,7 +98,7 @@ func New(ctx context.Context, cfg *config.Config, db *store.DB, log *slog.Logger
 	// Each capability stays unadvertised until it is implemented: announcing
 	// one early puts a control in the client that then fails.
 	features := ocs.Features{
-		Trashbin: false, Versioning: false, Chunking: true, Push: true,
+		Trashbin: cfg.Trash.Enabled, Versioning: false, Chunking: true, Push: true,
 		Previews: cfg.Preview.Enabled,
 	}
 
@@ -214,6 +217,15 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("/remote.php/webdav/{path...}", protected(http.HandlerFunc(s.dav.ServeLegacy)))
 	mux.Handle("/remote.php/webdav", protected(http.HandlerFunc(s.dav.ServeLegacy)))
 
+	// The trashbin. Only routed when deletes are actually recoverable: a client
+	// shown an empty trash it can never fill would be worse than one that knows
+	// the server has none.
+	if s.dav.TrashEnabled() {
+		trash := s.dav.Trashbin()
+		mux.Handle(dav.TrashPrefix+"{user}/{path...}", protected(trash))
+		mux.Handle(dav.TrashPrefix+"{user}", protected(trash))
+	}
+
 	// Chunked upload, which clients use for anything large.
 	mux.Handle("/remote.php/dav/uploads/{user}/{path...}", protected(s.uploads))
 
@@ -325,6 +337,7 @@ func (s *Server) Run(ctx context.Context) error {
 	go s.prunePairingSessions(ctx)
 	go s.pruneUploads(ctx)
 	go s.prunePreviews(ctx)
+	go s.pruneTrash(ctx)
 	go s.rescan(ctx)
 	go s.watch(ctx)
 
@@ -495,6 +508,74 @@ func (s *Server) watch(ctx context.Context) {
 // abandonedUploadTTL is how long an untouched transfer is kept. It matches the
 // window Nextcloud allows, and clients do not expect to resume beyond it.
 const abandonedUploadTTL = 24 * time.Hour
+
+// trashPruneInterval is how often expired deletions are swept.
+const trashPruneInterval = 6 * time.Hour
+
+// pruneTrash removes deletions that have outlived their retention.
+//
+// Without it the trash is not a trash but a second copy of everything anybody
+// ever deleted, quietly occupying the volume the files came from.
+func (s *Server) pruneTrash(ctx context.Context) {
+	retention := s.cfg.Trash.Retention.Duration()
+	if !s.cfg.Trash.Enabled || retention <= 0 {
+		return
+	}
+	sweep := func() {
+		users, err := s.db.ListUsers(ctx)
+		if err != nil {
+			s.log.Error("could not list accounts to sweep the trash", "error", err)
+			return
+		}
+		cutoff := time.Now().Add(-retention)
+		for _, u := range users {
+			expired, err := store.ExpiredTrash(ctx, s.db, u.ID, cutoff)
+			if err != nil {
+				s.log.Error("could not read expired deletions", "user", u.Username, "error", err)
+				continue
+			}
+			if len(expired) == 0 {
+				continue
+			}
+			st, err := s.storage.For(u.ID, u.Home, u.UID, u.GID)
+			if err != nil {
+				s.log.Error("could not open storage to sweep the trash",
+					"user", u.Username, "error", err)
+				continue
+			}
+			var freed int64
+			for _, e := range expired {
+				if err := st.RemoveFromTrash(e.Name); err != nil {
+					s.log.Warn("could not remove an expired deletion",
+						"user", u.Username, "entry", e.Name, "error", err)
+				}
+				// Forgotten either way: an entry whose file is gone would be
+				// listed to the client and fail to restore.
+				if err := store.RemoveTrashEntry(ctx, s.db, u.ID, e.Name); err != nil {
+					s.log.Error("could not forget an expired deletion",
+						"user", u.Username, "entry", e.Name, "error", err)
+					continue
+				}
+				freed += e.Size
+			}
+			s.log.Info("swept expired deletions",
+				"user", u.Username, "entries", len(expired), "freed_bytes", freed,
+				"older_than", retention)
+		}
+	}
+
+	timer := time.NewTimer(trashPruneInterval)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			sweep()
+			timer.Reset(trashPruneInterval)
+		}
+	}
+}
 
 // previewPruneInterval is how often the preview cache is swept. Daily: the
 // entries are small and the sweep only walks Mirage's own directory, but there

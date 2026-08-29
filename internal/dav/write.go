@@ -175,7 +175,8 @@ func (h *Handler) handleDelete(w http.ResponseWriter, r *http.Request, user stor
 		http.Error(w, "cannot delete the collection root", http.StatusMethodNotAllowed)
 		return
 	}
-	if _, err := store.NodeByPath(r.Context(), h.db, user.ID, targetPath); err != nil {
+	node, err := store.NodeByPath(r.Context(), h.db, user.ID, targetPath)
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			http.NotFound(w, r)
 			return
@@ -189,15 +190,73 @@ func (h *Handler) handleDelete(w http.ResponseWriter, r *http.Request, user stor
 		h.internalError(w, "open storage", err)
 		return
 	}
-	if err := st.Remove(targetPath); err != nil {
+
+	if h.trashRetention > 0 {
+		if err := h.moveToTrash(r, st, user, node); err != nil {
+			// Falling through to an outright delete would be the one behaviour
+			// nobody wants from a trashbin, so the request fails instead and
+			// the file stays where it is.
+			h.log.Error("could not move a deleted file to the trash",
+				"user", user.Username, "path", targetPath, "error", err)
+			http.Error(w, "could not delete that file", http.StatusInternalServerError)
+			return
+		}
+	} else if err := st.Remove(targetPath); err != nil {
 		h.internalError(w, "delete", err)
 		return
 	}
+
 	if err := h.updater.Removed(r.Context(), user, targetPath); err != nil {
 		h.internalError(w, "index deletion", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// moveToTrash puts a deleted file aside instead of unlinking it.
+//
+// A directory goes in whole, in one rename, so deleting a folder of ten
+// thousand photographs costs the same as deleting one file - and restoring it
+// brings the lot back.
+func (h *Handler) moveToTrash(r *http.Request, st *fsx.Storage, user store.User, node store.Node) error {
+	name := fsx.TrashName(node.Path, time.Now())
+	// Two files of the same name deleted from different folders in the same
+	// second would collide, and the second would destroy the first.
+	for n := 2; ; n++ {
+		if _, err := store.TrashByName(r.Context(), h.db, user.ID, name); errors.Is(err, store.ErrNotFound) {
+			break
+		} else if err != nil {
+			return err
+		}
+		if n > 100 {
+			return fmt.Errorf("no free trash name for %s", node.Path)
+		}
+		name = fsx.TrashName(node.Path, time.Now()) + "-" + strconv.Itoa(n)
+	}
+
+	if err := st.MoveToTrash(node.Path, name); err != nil {
+		return err
+	}
+	_, err := store.AddTrashEntry(r.Context(), h.db, user.ID, store.TrashEntry{
+		Name:         name,
+		OriginalPath: node.Path,
+		DeletedAt:    time.Now(),
+		Size:         node.Size,
+		IsDir:        node.IsDir,
+	})
+	if err != nil {
+		// The file is already aside. Putting it back is the only way to leave
+		// things consistent, since an untracked entry is invisible and would
+		// never expire.
+		if restoreErr := st.RestoreFromTrash(name, node.Path); restoreErr != nil {
+			h.log.Error("a file was moved to the trash but could not be recorded or put back",
+				"user", user.Username, "path", node.Path, "entry", name, "error", restoreErr)
+		}
+		return err
+	}
+	h.log.Info("moved a deleted file to the trash",
+		"user", user.Username, "path", node.Path, "entry", name)
+	return nil
 }
 
 // handleMoveCopy implements MOVE and COPY, which differ only in whether the

@@ -33,7 +33,7 @@ Early development. Milestone progress:
 - [x] **M5** — out-of-band changes: watcher, rescan, rename detection
 - [x] **M6** — instant sync via notify_push
 - [x] search by filename, account pictures, a browse-and-download web view
-- [ ] **M7** — previews (done), trashbin, versions
+- [ ] **M7** — previews (done), trashbin (done), versions
 - [ ] **M8** — quotas, rate limiting, hardening
 
 ## The web view

@@ -26,6 +26,7 @@ type Config struct {
 	Database Database `yaml:"database"`
 	Storage  Storage  `yaml:"storage"`
 	Preview  Preview  `yaml:"preview"`
+	Trash    Trash    `yaml:"trash"`
 	// Users is optional; see the note on User. An empty list means accounts are
 	// managed through the admin page instead.
 	Users []User `yaml:"users"`
@@ -109,6 +110,17 @@ type Storage struct {
 	Exclude []string `yaml:"exclude"`
 }
 
+// Trash configures what happens to deleted files.
+type Trash struct {
+	// Enabled makes a delete recoverable. With it off a delete is permanent,
+	// which is what Mirage did before this existed.
+	Enabled bool `yaml:"enabled"`
+	// Retention is how long a deleted file is kept before it is removed for
+	// good. Trashed files still occupy the account's disk, so this is the knob
+	// that decides how much space that costs.
+	Retention Duration `yaml:"retention"`
+}
+
 // Preview configures the small images shown instead of file icons.
 type Preview struct {
 	// Enabled turns previews on. With it off the endpoint reports that a file
@@ -166,6 +178,10 @@ func Default() Config {
 			RescanInterval:      Duration(6 * time.Hour),
 			QuickRescanInterval: Duration(5 * time.Minute),
 			Watcher:             true,
+		},
+		Trash: Trash{
+			Enabled:   true,
+			Retention: Duration(30 * 24 * time.Hour),
 		},
 		Preview: Preview{
 			Enabled:     true,
@@ -237,6 +253,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Storage.ScanWorkers < 0 {
 		return fmt.Errorf("storage.scan_workers must not be negative (use 0 to derive it)")
+	}
+	if c.Trash.Enabled && c.Trash.Retention <= 0 {
+		return fmt.Errorf("trash.retention must be positive when the trash is enabled")
 	}
 	if c.Preview.Enabled {
 		if c.Preview.CacheDir == "" {

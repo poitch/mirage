@@ -30,11 +30,21 @@ type Handler struct {
 	scanner    *index.Scanner
 	log        *slog.Logger
 	instanceID string
+	// trashRetention is how long a deleted file is kept. Zero means deletes are
+	// permanent, and the trashbin endpoints are not served.
+	trashRetention time.Duration
 	// readOnly reflects what the server can currently honour. It drives both
 	// the advertised oc:permissions and which methods are allowed, so the two
 	// can never disagree.
 	readOnly bool
 }
+
+// SetTrashRetention turns the trashbin on and says how long deletions are
+// kept. Zero makes deletes permanent.
+func (h *Handler) SetTrashRetention(d time.Duration) { h.trashRetention = max(d, 0) }
+
+// TrashEnabled reports whether deletes are recoverable.
+func (h *Handler) TrashEnabled() bool { return h.trashRetention > 0 }
 
 // NewHandler builds the files handler.
 func NewHandler(db *store.DB, storage *fsx.Manager, updater *index.Updater,
