@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/poitch/mirage/internal/auth"
@@ -66,7 +67,20 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, user store.User,
 		http.NotFound(w, r)
 		return
 	}
+	// A HEIF photograph is answered with the camera's own small copy, which is
+	// still HEIF. A client that cannot read that is told there is no preview
+	// rather than being sent something it will render as a broken image - and
+	// it draws its own icon, which is what it would have done anyway.
+	if IsHEIF(node.Name) && !acceptsHEIF(r) {
+		http.NotFound(w, r)
+		return
+	}
 
+	if IsHEIF(node.Name) {
+		// The size is not honoured for these, so every request for one is the
+		// same picture and shares a cache entry.
+		size = 0
+	}
 	key := Key(user.ID, node.ID, node.ETag, size)
 	etag := `"` + key[:24] + `"`
 
@@ -78,7 +92,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, user store.User,
 	}
 
 	if data := h.cache.Get(key); data != nil {
-		h.write(w, r, data)
+		h.write(w, r, data, contentTypeFor(node.Name))
 		return
 	}
 
@@ -93,7 +107,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, user store.User,
 
 	// Checked again: something else may have made it while this request waited.
 	if data := h.cache.Get(key); data != nil {
-		h.write(w, r, data)
+		h.write(w, r, data, contentTypeFor(node.Name))
 		return
 	}
 
@@ -127,7 +141,37 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, user store.User,
 		"from_thumbnail", result.FromThumbnail, "took", time.Since(start))
 
 	h.cache.Put(key, result.Data)
-	h.write(w, r, result.Data)
+	h.write(w, r, result.Data, result.ContentType)
+}
+
+// acceptsHEIF reports whether the caller can display a HEIF picture.
+//
+// Preferably from the Accept header, which is what it is for. Clients that send
+// nothing useful there are recognised by name instead: every iPhone and every
+// recent Mac decodes HEIF in hardware, and refusing them a preview because
+// their request did not say so would give up the whole point of this. Anything
+// unrecognised is treated as unable, which costs it an icon rather than a
+// broken image.
+func acceptsHEIF(r *http.Request) bool {
+	accept := strings.ToLower(r.Header.Get("Accept"))
+	if strings.Contains(accept, "image/heic") || strings.Contains(accept, "image/heif") {
+		return true
+	}
+	agent := r.Header.Get("User-Agent")
+	for _, marker := range []string{"iOS", "iPhone", "iPad", "Macintosh", "Darwin", "CFNetwork"} {
+		if strings.Contains(agent, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// contentTypeFor is what a cached preview of this file is.
+func contentTypeFor(name string) string {
+	if IsHEIF(name) {
+		return "image/heic"
+	}
+	return "image/jpeg"
 }
 
 // resolve finds the file a request is asking about.
@@ -186,8 +230,11 @@ func requestedSize(r *http.Request) int {
 	return 256
 }
 
-func (h *Handler) write(w http.ResponseWriter, r *http.Request, data []byte) {
-	w.Header().Set("Content-Type", "image/jpeg")
+func (h *Handler) write(w http.ResponseWriter, r *http.Request, data []byte, contentType string) {
+	if contentType == "" {
+		contentType = "image/jpeg"
+	}
+	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if r.Method == http.MethodHead {

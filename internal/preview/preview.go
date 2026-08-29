@@ -56,7 +56,12 @@ var ErrUnsupported = errors.New("no preview can be made for this file")
 
 // Result is a generated preview.
 type Result struct {
-	Data          []byte
+	Data []byte
+	// ContentType is what the bytes are. Not always JPEG: a HEIC photograph is
+	// served as the camera's own small HEIC, because turning it into a JPEG
+	// would mean decoding it and a device that reads HEIC does that in hardware
+	// for nothing.
+	ContentType   string
 	Width, Height int
 	// FromThumbnail records that the camera's own embedded thumbnail was used
 	// rather than the full image being decoded. Worth knowing: it is the
@@ -81,8 +86,27 @@ func Bucket(size int) int {
 // listing to find out, and on a share this size that is the whole cost the
 // preview endpoint is trying to avoid.
 func Supported(name string) bool {
+	return IsHEIF(name) || decodable(name)
+}
+
+// decodable reports whether a name is a format this can decode and re-encode
+// into a JPEG, which is what any client can display.
+func decodable(name string) bool {
 	switch strings.ToLower(path.Ext(name)) {
 	case ".jpg", ".jpeg", ".png", ".gif":
+		return true
+	}
+	return false
+}
+
+// IsHEIF reports whether a name is a HEIF-family picture.
+//
+// These are answered by lifting out the camera's own thumbnail rather than by
+// decoding anything, so they are only useful to a client that reads HEIC. The
+// caller checks that before asking.
+func IsHEIF(name string) bool {
+	switch strings.ToLower(path.Ext(name)) {
+	case ".heic", ".heif", ".hif":
 		return true
 	}
 	return false
@@ -94,7 +118,10 @@ func Supported(name string) bool {
 // a preview of what the index remembers would be a preview of the wrong thing
 // after somebody edits a photograph.
 func Generate(r io.ReadSeeker, name string, size int) (Result, error) {
-	if !Supported(name) {
+	if IsHEIF(name) {
+		return heifPreview(r)
+	}
+	if !decodable(name) {
 		return Result{}, ErrUnsupported
 	}
 	size = min(max(size, MinSize), MaxSize)
@@ -274,6 +301,26 @@ func applyOrientation(src *image.RGBA, o Orientation) *image.RGBA {
 	return out
 }
 
+// heifPreview serves a HEIF photograph's own small copy, unaltered.
+//
+// The size asked for is not honoured, because honouring it would mean decoding
+// the picture. The thumbnail a phone stores is around 576 pixels on its long
+// side, which covers every size a client asks for in a listing; anything larger
+// is scaled by the client, which is where the pixels are going anyway.
+func heifPreview(r io.ReadSeeker) (Result, error) {
+	thumb, err := extractHEIFThumbnail(r)
+	if errors.Is(err, ErrNoThumbnail) {
+		return Result{}, ErrUnsupported
+	}
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{
+		Data: thumb.Data, ContentType: "image/heic",
+		Width: thumb.Width, Height: thumb.Height, FromThumbnail: true,
+	}, nil
+}
+
 func encode(img *image.RGBA, fromThumbnail bool) (Result, error) {
 	var buf bytes.Buffer
 	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: quality}); err != nil {
@@ -281,7 +328,8 @@ func encode(img *image.RGBA, fromThumbnail bool) (Result, error) {
 	}
 	b := img.Bounds()
 	return Result{
-		Data: buf.Bytes(), Width: b.Dx(), Height: b.Dy(), FromThumbnail: fromThumbnail,
+		Data: buf.Bytes(), ContentType: "image/jpeg",
+		Width: b.Dx(), Height: b.Dy(), FromThumbnail: fromThumbnail,
 	}, nil
 }
 

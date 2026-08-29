@@ -232,3 +232,60 @@ func propValue(t *testing.T, h *harness, path, space, local string) string {
 	t.Helper()
 	return h.prop(t, "/remote.php/dav/files/alice/"+path, space, local)
 }
+
+// TestHEICPreviewIsNegotiated: a HEIF photograph is answered with the camera's
+// own small copy, which is still HEIF. A client that reads HEIF gets it; one
+// that does not is told there is no preview and draws its own icon, rather than
+// being sent something it renders as a broken image.
+func TestHEICPreviewIsNegotiated(t *testing.T) {
+	h := newHarness(t)
+	// Not a real HEIF file: what is under test here is the negotiation, and a
+	// file with no thumbnail in it is refused either way.
+	writeFile(t, filepath.Join(h.homes["alice"], "phone.heic"), "not really a photo")
+	if err := h.server.scanner.ScanAll(t.Context(), "test"); err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+	id, err := nodeIDFor(t, h, aliceID(t, h), "phone.heic")
+	if err != nil {
+		t.Fatalf("find the file: %v", err)
+	}
+
+	// A client that says nothing useful is not offered one.
+	plain := h.do("GET", previewURL(id, 256), "alice", alicePassword, "",
+		map[string]string{"User-Agent": "SomeClient/1.0"})
+	readBody(t, plain)
+	if plain.StatusCode != http.StatusNotFound {
+		t.Errorf("a client that cannot read HEIF got %d, want 404", plain.StatusCode)
+	}
+
+	// One that asks for it by name gets as far as the extractor, which refuses
+	// this file because it is not a photograph - a different 404, but it proves
+	// the negotiation let it through.
+	for _, headers := range []map[string]string{
+		{"Accept": "image/heic,image/*"},
+		{"User-Agent": "Mozilla/5.0 (iOS) Nextcloud-iOS/34.1.4"},
+	} {
+		resp := h.do("GET", previewURL(id, 256), "alice", alicePassword, "", headers)
+		readBody(t, resp)
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("headers %v gave %d", headers, resp.StatusCode)
+		}
+	}
+}
+
+// TestHEICIsAdvertisedAsPreviewable, so an iPhone asks for one at all.
+func TestHEICIsAdvertisedAsPreviewable(t *testing.T) {
+	h := newHarness(t)
+	writeFile(t, filepath.Join(h.homes["alice"], "phone.heic"), "x")
+	if err := h.server.scanner.ScanAll(t.Context(), "test"); err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+	if got := propValue(t, h, "phone.heic", "http://nextcloud.org/ns", "has-preview"); got != "true" {
+		t.Errorf("has-preview for a HEIC = %q, want true", got)
+	}
+	body := readBody(t, h.do("GET", "/ocs/v2.php/cloud/capabilities?format=json",
+		"alice", alicePassword, "", nil))
+	if !strings.Contains(body, "image/heic") {
+		t.Errorf("capabilities do not mention HEIC:\n%s", body)
+	}
+}

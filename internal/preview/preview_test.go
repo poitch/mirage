@@ -95,10 +95,22 @@ func TestGenerateRefusesWhatItCannotRead(t *testing.T) {
 func TestSupportedByExtension(t *testing.T) {
 	for name, want := range map[string]bool{
 		"a.jpg": true, "a.JPEG": true, "a.png": true, "a.gif": true,
-		"a.heic": false, "a.txt": false, "a.mp4": false, "a": false,
+		// Answered with the camera's own copy rather than by decoding, so it
+		// counts as supported even though nothing here can read it.
+		"a.heic": true, "a.HEIC": true, "a.heif": true,
+		"a.txt": false, "a.mp4": false, "a": false,
 	} {
 		if got := Supported(name); got != want {
 			t.Errorf("Supported(%q) = %v, want %v", name, got, want)
+		}
+	}
+	// The two are separate: one says a preview exists, the other says it can be
+	// turned into something every client reads.
+	for name, want := range map[string]bool{
+		"a.jpg": true, "a.heic": false, "a.heif": false,
+	} {
+		if got := decodable(name); got != want {
+			t.Errorf("decodable(%q) = %v, want %v", name, got, want)
 		}
 	}
 }

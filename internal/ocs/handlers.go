@@ -82,7 +82,10 @@ func (s *Service) previewCapabilities() *previewCaps {
 		// Named explicitly rather than claiming everything: a client that knows
 		// a HEIC has no preview here can draw its icon straight away instead of
 		// asking and waiting for a 404.
-		Supported: []string{"image/jpeg", "image/png", "image/gif"},
+		// HEIC is included because a photograph from a phone is answered with
+		// the camera's own small copy of it, which is HEIC too. A client that
+		// cannot read that gets no preview and draws an icon.
+		Supported: []string{"image/jpeg", "image/png", "image/gif", "image/heic"},
 	}
 }
 
