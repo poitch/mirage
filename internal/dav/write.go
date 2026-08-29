@@ -74,6 +74,20 @@ func (h *Handler) handlePut(w http.ResponseWriter, r *http.Request, user store.U
 		return
 	}
 
+	// The earlier contents are copied aside before anything overwrites them.
+	// Reported as an error rather than skipped: a save that silently loses the
+	// only copy of what was there is the one failure versioning exists to
+	// prevent.
+	if replacing {
+		if err := h.keepVersion(r, st, user, existing); err != nil {
+			h.log.Error("could not keep a version of a file being overwritten",
+				"user", user.Username, "path", filePath, "error", err)
+			http.Error(w, "could not save the previous version of that file",
+				http.StatusInternalServerError)
+			return
+		}
+	}
+
 	result, err := st.WriteFile(filePath, r.Body, opts)
 	if err != nil {
 		switch {
@@ -257,6 +271,90 @@ func (h *Handler) moveToTrash(r *http.Request, st *fsx.Storage, user store.User,
 	h.log.Info("moved a deleted file to the trash",
 		"user", user.Username, "path", node.Path, "entry", name)
 	return nil
+}
+
+// keepVersion copies a file's current contents aside before it is overwritten.
+//
+// Files above the configured size are skipped rather than versioned, and that
+// is reported as success: keeping a version of a five gigabyte video would cost
+// more than the account's entire document history, and refusing the upload over
+// it would be worse still.
+func (h *Handler) keepVersion(r *http.Request, st *fsx.Storage, user store.User, node store.Node) error {
+	if !h.versions.Enabled || node.IsDir {
+		return nil
+	}
+	if h.versions.MaxFileSize > 0 && node.Size > h.versions.MaxFileSize {
+		h.log.Debug("not keeping a version; the file is over the size limit",
+			"user", user.Username, "path", node.Path, "size", node.Size)
+		return nil
+	}
+	// An empty file has nothing worth keeping, and a save that only touches the
+	// timestamp would otherwise fill the history with identical copies.
+	if node.Size == 0 {
+		return nil
+	}
+
+	// A version is addressed by whole seconds, because that is the resolution
+	// clients use. The file's own modification time is the natural stamp - it
+	// says when these contents were current - but two edits can share a second,
+	// and collapsing them would silently discard one of the two. So a taken
+	// stamp moves to the next free second rather than being skipped: slightly
+	// inaccurate, and the alternative loses somebody's work.
+	stamp := node.MTime.Truncate(time.Second)
+	for range 60 {
+		_, err := store.VersionAt(r.Context(), h.db, user.ID, node.ID, stamp)
+		if errors.Is(err, store.ErrNotFound) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		stamp = stamp.Add(time.Second)
+	}
+
+	size, err := st.SaveVersion(node.Path, node.ID, stamp.Unix())
+	if err != nil {
+		return err
+	}
+	if _, err := store.AddVersion(r.Context(), h.db, user.ID, store.Version{
+		NodeID: node.ID, Path: node.Path, Timestamp: stamp, Size: size,
+	}); err != nil {
+		// The copy exists but nothing knows about it, which would leave it
+		// occupying disk forever. Removing it is the only tidy outcome.
+		if rmErr := st.RemoveVersion(node.ID, stamp.Unix()); rmErr != nil {
+			h.log.Error("a version was written but could not be recorded or removed",
+				"user", user.Username, "path", node.Path, "error", rmErr)
+		}
+		return err
+	}
+
+	h.trimVersions(r, st, user, node.ID)
+	return nil
+}
+
+// trimVersions discards the oldest copies of a file beyond the limit.
+//
+// Best effort: failing to trim is not a reason to fail the save that triggered
+// it, and the periodic sweep catches whatever is left.
+func (h *Handler) trimVersions(r *http.Request, st *fsx.Storage, user store.User, nodeID int64) {
+	if h.versions.MaxPerFile <= 0 {
+		return
+	}
+	surplus, err := store.SurplusVersions(r.Context(), h.db, user.ID, nodeID, h.versions.MaxPerFile)
+	if err != nil {
+		h.log.Warn("could not read surplus versions", "user", user.Username, "error", err)
+		return
+	}
+	for _, v := range surplus {
+		if err := st.RemoveVersion(v.NodeID, v.Timestamp.Unix()); err != nil {
+			h.log.Warn("could not remove a surplus version",
+				"user", user.Username, "path", v.Path, "error", err)
+		}
+		if err := store.RemoveVersion(r.Context(), h.db, user.ID, v.ID); err != nil {
+			h.log.Warn("could not forget a surplus version",
+				"user", user.Username, "path", v.Path, "error", err)
+		}
+	}
 }
 
 // handleMoveCopy implements MOVE and COPY, which differ only in whether the

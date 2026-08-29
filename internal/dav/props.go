@@ -53,6 +53,12 @@ type resourceContext struct {
 	instanceID string
 	usage      int64
 	readOnly   bool
+	// hasPreview reports whether a thumbnail can be produced for this entry.
+	//
+	// Clients read nc:has-preview and only ask for a picture when it says yes,
+	// so reporting false means the preview endpoint is never called at all -
+	// which is what made previews appear not to work even once they existed.
+	hasPreview bool
 }
 
 // permissions renders the oc:permissions letters for an entry.
@@ -162,6 +168,9 @@ func (rc resourceContext) resolve(name PropName) (string, bool) {
 		return "0", true
 
 	case propNCHasPreview:
+		if rc.hasPreview {
+			return "true", true
+		}
 		return "false", true
 
 	case propNCIsEncrypted:

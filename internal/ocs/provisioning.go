@@ -107,6 +107,41 @@ func (s *Service) Terms(v Version) http.HandlerFunc {
 	}
 }
 
+// DirectEditing serves /ocs/v{1,2}.php/apps/files/api/v1/directEditing.
+//
+// The apps ask which editors the server offers so they can open a document
+// without downloading it. Mirage has none - it stores files and syncs them -
+// so the honest answer is an empty set, which the apps read as "download it and
+// edit it locally".
+func (s *Service) DirectEditing(v Version) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		Write(w, r, v, directEditing{
+			Editors:   map[string]struct{}{},
+			Creators:  map[string]struct{}{},
+			Templates: map[string]struct{}{},
+		})
+	}
+}
+
+// directEditing is the shape the apps expect: three maps keyed by editor id.
+// Empty ones are a valid answer, where a missing endpoint is not.
+type directEditing struct {
+	Editors   map[string]struct{} `xml:"editors" json:"editors"`
+	Creators  map[string]struct{} `xml:"creators" json:"creators"`
+	Templates map[string]struct{} `xml:"templates" json:"templates"`
+}
+
+// DashboardWidgets serves /ocs/v{1,2}.php/apps/dashboard/api/v1/widgets.
+//
+// Nextcloud's dashboard is a web page of panels. Mirage has no web application
+// to put panels in, so it offers none - and saying so stops the apps asking on
+// every connection.
+func (s *Service) DashboardWidgets(v Version) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		Write(w, r, v, map[string]struct{}{})
+	}
+}
+
 // PushRegistration serves the notifications app's device registration.
 //
 // Nextcloud registers a device with a hosted proxy that then delivers push

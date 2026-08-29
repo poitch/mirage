@@ -167,3 +167,26 @@ trash:
   # disk the trash costs.
   retention: 720h
 
+# Earlier copies of files that have been overwritten, listable and restorable
+# from the client.
+#
+# Keeping a version means copying the file. A hard link would be instant and
+# free, and would be wrong: it shares one inode with the live file, so anything
+# writing in place - which is what SMB clients and many editors do - would
+# rewrite the history along with the file. The copy is what makes a version
+# independent, and the limits below are what stop it being expensive.
+versions:
+  enabled: true
+
+  # Versions older than this are discarded.
+  retention: 720h
+
+  # How many copies of one file to keep. A document saved every few minutes all
+  # day would otherwise accumulate hundreds.
+  max_per_file: 20
+
+  # The largest file that gets a version at all, in bytes. Without a bound, one
+  # large video saved twice costs more than the whole document history.
+  # Zero versions everything.
+  max_file_size: 268435456
+

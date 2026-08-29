@@ -85,9 +85,20 @@ func New(ctx context.Context, cfg *config.Config, db *store.DB, log *slog.Logger
 
 	const readOnly = false
 	davHandler := dav.NewHandler(db, storage, updater, scanner, log, instanceID, readOnly)
+	if previews != nil {
+		// Clients only ask for a thumbnail when a listing says one exists, so
+		// this is what actually makes previews reach a phone.
+		davHandler.SetPreviewable(preview.Supported)
+	}
 	if cfg.Trash.Enabled {
 		davHandler.SetTrashRetention(cfg.Trash.Retention.Duration())
 	}
+	davHandler.SetVersionPolicy(dav.VersionPolicy{
+		Enabled:     cfg.Versions.Enabled,
+		Retention:   cfg.Versions.Retention.Duration(),
+		MaxPerFile:  cfg.Versions.MaxPerFile,
+		MaxFileSize: cfg.Versions.MaxFileSize,
+	})
 	uploadHandler := dav.NewUploadHandler(db, storage, updater, log, instanceID)
 
 	loginFlow, err := auth.NewLoginFlow(db, authenticator, cfg.Server.ExternalURL, log)
@@ -98,7 +109,8 @@ func New(ctx context.Context, cfg *config.Config, db *store.DB, log *slog.Logger
 	// Each capability stays unadvertised until it is implemented: announcing
 	// one early puts a control in the client that then fails.
 	features := ocs.Features{
-		Trashbin: cfg.Trash.Enabled, Versioning: false, Chunking: true, Push: true,
+		Trashbin: cfg.Trash.Enabled, Versioning: cfg.Versions.Enabled,
+		Chunking: true, Push: true,
 		Previews: cfg.Preview.Enabled,
 	}
 
@@ -192,6 +204,10 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("GET /ocs/v2.php/core/navigation/apps", protected(s.ocs.NavigationApps(ocs.V2)))
 	mux.Handle("GET /ocs/v1.php/apps/terms_of_service/terms", protected(s.ocs.Terms(ocs.V1)))
 	mux.Handle("GET /ocs/v2.php/apps/terms_of_service/terms", protected(s.ocs.Terms(ocs.V2)))
+	mux.Handle("GET /ocs/v1.php/apps/files/api/v1/directEditing", protected(s.ocs.DirectEditing(ocs.V1)))
+	mux.Handle("GET /ocs/v2.php/apps/files/api/v1/directEditing", protected(s.ocs.DirectEditing(ocs.V2)))
+	mux.Handle("GET /ocs/v1.php/apps/dashboard/api/v1/widgets", protected(s.ocs.DashboardWidgets(ocs.V1)))
+	mux.Handle("GET /ocs/v2.php/apps/dashboard/api/v1/widgets", protected(s.ocs.DashboardWidgets(ocs.V2)))
 	mux.Handle("POST /ocs/v2.php/apps/notifications/api/v2/push", protected(s.ocs.PushRegistration(ocs.V2)))
 	mux.Handle("DELETE /ocs/v2.php/apps/notifications/api/v2/push", protected(s.ocs.PushRegistration(ocs.V2)))
 
@@ -224,6 +240,13 @@ func (s *Server) routes() http.Handler {
 		trash := s.dav.Trashbin()
 		mux.Handle(dav.TrashPrefix+"{user}/{path...}", protected(trash))
 		mux.Handle(dav.TrashPrefix+"{user}", protected(trash))
+	}
+
+	// Earlier copies of overwritten files.
+	if s.dav.VersionsEnabled() {
+		versions := s.dav.Versions()
+		mux.Handle(dav.VersionsPrefix+"{user}/{path...}", protected(versions))
+		mux.Handle(dav.VersionsPrefix+"{user}", protected(versions))
 	}
 
 	// Chunked upload, which clients use for anything large.
@@ -338,6 +361,7 @@ func (s *Server) Run(ctx context.Context) error {
 	go s.pruneUploads(ctx)
 	go s.prunePreviews(ctx)
 	go s.pruneTrash(ctx)
+	go s.pruneVersions(ctx)
 	go s.rescan(ctx)
 	go s.watch(ctx)
 
@@ -508,6 +532,80 @@ func (s *Server) watch(ctx context.Context) {
 // abandonedUploadTTL is how long an untouched transfer is kept. It matches the
 // window Nextcloud allows, and clients do not expect to resume beyond it.
 const abandonedUploadTTL = 24 * time.Hour
+
+// versionPruneInterval is how often expired versions are swept.
+const versionPruneInterval = 6 * time.Hour
+
+// pruneVersions discards versions that have outlived their retention, and any
+// belonging to files that no longer exist.
+//
+// The orphan sweep matters because a version outlives its file: deleting the
+// file moves it to the trash, and once that expires there is nothing left to
+// restore the versions onto.
+func (s *Server) pruneVersions(ctx context.Context) {
+	retention := s.cfg.Versions.Retention.Duration()
+	if !s.cfg.Versions.Enabled || retention <= 0 {
+		return
+	}
+	sweep := func() {
+		users, err := s.db.ListUsers(ctx)
+		if err != nil {
+			s.log.Error("could not list accounts to sweep versions", "error", err)
+			return
+		}
+		cutoff := time.Now().Add(-retention)
+		for _, u := range users {
+			expired, err := store.ExpiredVersions(ctx, s.db, u.ID, cutoff)
+			if err != nil {
+				s.log.Error("could not read expired versions", "user", u.Username, "error", err)
+				continue
+			}
+			orphaned, err := store.OrphanedVersions(ctx, s.db, u.ID)
+			if err != nil {
+				s.log.Error("could not read orphaned versions", "user", u.Username, "error", err)
+				continue
+			}
+			all := append(expired, orphaned...)
+			if len(all) == 0 {
+				continue
+			}
+			st, err := s.storage.For(u.ID, u.Home, u.UID, u.GID)
+			if err != nil {
+				s.log.Error("could not open storage to sweep versions",
+					"user", u.Username, "error", err)
+				continue
+			}
+			var freed int64
+			for _, v := range all {
+				if err := st.RemoveVersion(v.NodeID, v.Timestamp.Unix()); err != nil {
+					s.log.Warn("could not remove an expired version",
+						"user", u.Username, "path", v.Path, "error", err)
+				}
+				if err := store.RemoveVersion(ctx, s.db, u.ID, v.ID); err != nil {
+					s.log.Error("could not forget an expired version",
+						"user", u.Username, "path", v.Path, "error", err)
+					continue
+				}
+				freed += v.Size
+			}
+			s.log.Info("swept versions",
+				"user", u.Username, "expired", len(expired), "orphaned", len(orphaned),
+				"freed_bytes", freed)
+		}
+	}
+
+	timer := time.NewTimer(versionPruneInterval)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			sweep()
+			timer.Reset(versionPruneInterval)
+		}
+	}
+}
 
 // trashPruneInterval is how often expired deletions are swept.
 const trashPruneInterval = 6 * time.Hour

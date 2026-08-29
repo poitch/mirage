@@ -27,6 +27,7 @@ type Config struct {
 	Storage  Storage  `yaml:"storage"`
 	Preview  Preview  `yaml:"preview"`
 	Trash    Trash    `yaml:"trash"`
+	Versions Versions `yaml:"versions"`
 	// Users is optional; see the note on User. An empty list means accounts are
 	// managed through the admin page instead.
 	Users []User `yaml:"users"`
@@ -121,6 +122,25 @@ type Trash struct {
 	Retention Duration `yaml:"retention"`
 }
 
+// Versions configures keeping earlier copies of overwritten files.
+type Versions struct {
+	// Enabled keeps the previous contents when a file is overwritten.
+	Enabled bool `yaml:"enabled"`
+	// Retention discards versions older than this.
+	Retention Duration `yaml:"retention"`
+	// MaxPerFile caps how many copies of one file are kept. A document saved
+	// every few minutes all day would otherwise accumulate hundreds.
+	MaxPerFile int `yaml:"max_per_file"`
+	// MaxFileSize is the largest file that gets a version at all.
+	//
+	// Keeping a version means copying the file - a hard link would share one
+	// inode with the live file, so anything writing in place, which is what SMB
+	// clients do, would rewrite the history too. Without a bound, one large
+	// video saved twice would cost more than the account's whole document
+	// history. Zero versions everything.
+	MaxFileSize int64 `yaml:"max_file_size"`
+}
+
 // Preview configures the small images shown instead of file icons.
 type Preview struct {
 	// Enabled turns previews on. With it off the endpoint reports that a file
@@ -182,6 +202,12 @@ func Default() Config {
 		Trash: Trash{
 			Enabled:   true,
 			Retention: Duration(30 * 24 * time.Hour),
+		},
+		Versions: Versions{
+			Enabled:     true,
+			Retention:   Duration(30 * 24 * time.Hour),
+			MaxPerFile:  20,
+			MaxFileSize: 256 << 20,
 		},
 		Preview: Preview{
 			Enabled:     true,
@@ -256,6 +282,17 @@ func (c *Config) Validate() error {
 	}
 	if c.Trash.Enabled && c.Trash.Retention <= 0 {
 		return fmt.Errorf("trash.retention must be positive when the trash is enabled")
+	}
+	if c.Versions.Enabled {
+		if c.Versions.Retention <= 0 {
+			return fmt.Errorf("versions.retention must be positive when versions are enabled")
+		}
+		if c.Versions.MaxPerFile < 0 {
+			return fmt.Errorf("versions.max_per_file must not be negative")
+		}
+		if c.Versions.MaxFileSize < 0 {
+			return fmt.Errorf("versions.max_file_size must not be negative (use 0 for no limit)")
+		}
 	}
 	if c.Preview.Enabled {
 		if c.Preview.CacheDir == "" {

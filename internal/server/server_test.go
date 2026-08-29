@@ -35,8 +35,24 @@ type harness struct {
 	homes  map[string]string
 }
 
+// harnessConfig lets a test bend the server's settings without every other test
+// having to care.
+type harnessConfig struct {
+	maxVersions     int
+	maxVersionBytes int64
+}
+
 func newHarness(t *testing.T) *harness {
 	t.Helper()
+	return newHarnessWith(t)
+}
+
+func newHarnessWith(t *testing.T, opts ...func(*harnessConfig)) *harness {
+	t.Helper()
+	hc := harnessConfig{maxVersions: 20, maxVersionBytes: 256 << 20}
+	for _, o := range opts {
+		o(&hc)
+	}
 	ctx := context.Background()
 	base := t.TempDir()
 
@@ -59,6 +75,8 @@ func newHarness(t *testing.T) *harness {
 	// Previews are cached in Mirage's own data directory, which in production
 	// is /var/lib/mirage and here has to be somewhere the test can write.
 	cfg.Preview.CacheDir = filepath.Join(base, "previews")
+	cfg.Versions.MaxPerFile = hc.maxVersions
+	cfg.Versions.MaxFileSize = hc.maxVersionBytes
 	for _, name := range []string{"alice", "bob"} {
 		cfg.Users = append(cfg.Users, config.User{
 			Username: name, DisplayName: strings.ToUpper(name[:1]) + name[1:],
@@ -204,7 +222,7 @@ func (h *harness) prop(t *testing.T, path, space, local string) string {
 		t.Fatalf("PROPFIND %s: status = %d", path, resp.StatusCode)
 	}
 	raw := readBody(t, resp)
-	re := regexp.MustCompile(`<(?:d|oc):` + regexp.QuoteMeta(local) + `>([^<]*)<`)
+	re := regexp.MustCompile(`<(?:d|oc|nc|s):` + regexp.QuoteMeta(local) + `>([^<]*)<`)
 	m := re.FindStringSubmatch(raw)
 	if m == nil {
 		return ""
@@ -220,6 +238,17 @@ func (h *harness) etag(t *testing.T, path string) string {
 func (h *harness) fileID(t *testing.T, path string) string {
 	t.Helper()
 	return h.prop(t, path, "http://owncloud.org/ns", "fileid")
+}
+
+// fileIDInt is the numeric index id of a path in alice's account, which is how
+// the versions endpoints address a file.
+func (h *harness) fileIDInt(t *testing.T, path string) int64 {
+	t.Helper()
+	n, err := store.NodeByPath(t.Context(), h.db, aliceID(t, h), path)
+	if err != nil {
+		t.Fatalf("look up %s: %v", path, err)
+	}
+	return n.ID
 }
 
 func aliceID(t *testing.T, h *harness) int64 {

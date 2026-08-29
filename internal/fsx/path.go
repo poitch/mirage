@@ -83,6 +83,13 @@ const UploadDir = ".mirage-uploads"
 // to every device as a new file, which is the opposite of deleting it.
 const TrashDir = ".mirage-trash"
 
+// VersionsDir holds earlier copies of files that have been overwritten.
+//
+// Inside the account for the same reason the trash is, and hidden from the
+// index for the same reason too: indexed, it would sync a copy of every earlier
+// draft of everything to every device.
+const VersionsDir = ".mirage-versions"
+
 // ignoredNames are entries that exist on the filesystem but are not the user's
 // files, and must not be indexed or shown to clients.
 //
@@ -104,7 +111,7 @@ var ignoredNames = map[string]bool{
 // filesystem machinery that is not the user's data.
 func IsInternal(name string) bool {
 	return strings.HasPrefix(name, tempPrefix) ||
-		name == UploadDir || name == TrashDir || ignoredNames[name]
+		name == UploadDir || name == TrashDir || name == VersionsDir || ignoredNames[name]
 }
 
 // Excluder decides whether an entry is excluded by operator configuration.

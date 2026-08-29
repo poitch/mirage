@@ -184,6 +184,8 @@ func TestChattyEndpointsAnswer(t *testing.T) {
 	for _, path := range []string{
 		"/ocs/v2.php/core/navigation/apps?format=json",
 		"/ocs/v2.php/apps/terms_of_service/terms?format=json",
+		"/ocs/v2.php/apps/files/api/v1/directEditing?format=json",
+		"/ocs/v2.php/apps/dashboard/api/v1/widgets?format=json",
 	} {
 		resp := h.do("GET", path, "alice", alicePassword, "", nil)
 		body := readBody(t, resp)

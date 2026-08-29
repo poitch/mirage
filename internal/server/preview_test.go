@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -198,4 +199,36 @@ func TestPreviewCapabilityIsAdvertised(t *testing.T) {
 
 func previewURL(fileID int64, size int) string {
 	return fmt.Sprintf("/index.php/core/preview?fileId=%d&x=%d&y=%d", fileID, size, size)
+}
+
+// TestListingsAdvertiseAPreview is what actually makes previews reach a phone.
+// Clients read nc:has-preview and only fetch a thumbnail when it says yes, so
+// a listing that reports false means the preview endpoint is never called and
+// the feature looks broken however well it works.
+func TestListingsAdvertiseAPreview(t *testing.T) {
+	h, _ := harnessWithPhoto(t)
+
+	// The photo has to appear in a listing at all before anything reads its
+	// properties.
+	body := readBody(t, h.propfind("/remote.php/dav/files/alice/", "alice", alicePassword, "1"))
+	if !strings.Contains(body, "holiday.jpg") {
+		t.Fatalf("the photo is not in the listing:\n%s", body)
+	}
+
+	if got := propValue(t, h, "holiday.jpg", "http://nextcloud.org/ns", "has-preview"); got != "true" {
+		t.Errorf("has-preview for a photo = %q, want true; clients will not ask for a thumbnail", got)
+	}
+	// And not claimed for things that have none, or a client fetches a picture
+	// only to be told there isn't one.
+	if got := propValue(t, h, "hello.txt", "http://nextcloud.org/ns", "has-preview"); got != "false" {
+		t.Errorf("has-preview for a text file = %q, want false", got)
+	}
+	if got := propValue(t, h, "docs", "http://nextcloud.org/ns", "has-preview"); got != "false" {
+		t.Errorf("has-preview for a folder = %q, want false", got)
+	}
+}
+
+func propValue(t *testing.T, h *harness, path, space, local string) string {
+	t.Helper()
+	return h.prop(t, "/remote.php/dav/files/alice/"+path, space, local)
 }
