@@ -56,6 +56,9 @@ func newHarness(t *testing.T) *harness {
 	cfg.Server.ExternalURL = "https://mirage.test"
 	cfg.Database.Path = filepath.Join(base, "index.db")
 	cfg.Storage.RescanInterval = 0
+	// Previews are cached in Mirage's own data directory, which in production
+	// is /var/lib/mirage and here has to be somewhere the test can write.
+	cfg.Preview.CacheDir = filepath.Join(base, "previews")
 	for _, name := range []string{"alice", "bob"} {
 		cfg.Users = append(cfg.Users, config.User{
 			Username: name, DisplayName: strings.ToUpper(name[:1]) + name[1:],

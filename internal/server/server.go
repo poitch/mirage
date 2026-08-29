@@ -16,6 +16,7 @@ import (
 	"github.com/poitch/mirage/internal/fsx"
 	"github.com/poitch/mirage/internal/index"
 	"github.com/poitch/mirage/internal/ocs"
+	"github.com/poitch/mirage/internal/preview"
 	"github.com/poitch/mirage/internal/push"
 	"github.com/poitch/mirage/internal/store"
 	"github.com/poitch/mirage/internal/web"
@@ -40,11 +41,15 @@ type Server struct {
 	push      *push.Hub
 	admin     *admin.Admin
 	web       *web.Site
-	http      *http.Server
+	previews  *preview.Handler
+	// previewCache is held separately so the maintenance loop can prune it.
+	previewCache *preview.Cache
+	http         *http.Server
 }
 
 // New builds a Server. It does not begin listening; call Run for that.
 func New(ctx context.Context, cfg *config.Config, db *store.DB, log *slog.Logger) (*Server, error) {
+	var previewCache *preview.Cache
 	authenticator := auth.NewAuthenticator(db, log)
 
 	instanceID, err := db.InstanceID(ctx)
@@ -55,6 +60,16 @@ func New(ctx context.Context, cfg *config.Config, db *store.DB, log *slog.Logger
 	// Already validated when the config loaded, so this cannot fail here.
 	excluder, _ := fsx.NewExcluder(cfg.Storage.Exclude)
 	storage := fsx.NewManager(cfg.Storage.FileMode.Perm(), cfg.Storage.DirMode.Perm(), excluder)
+	var previews *preview.Handler
+	if cfg.Preview.Enabled {
+		cache, err := preview.NewCache(cfg.Preview.CacheDir, cfg.Preview.Concurrency)
+		if err != nil {
+			return nil, fmt.Errorf("preview cache: %w", err)
+		}
+		previews = preview.NewHandler(db, storage, cache, log)
+		previewCache = cache
+	}
+
 	scanner := index.NewScanner(db, storage, log)
 	scanner.SetWorkers(cfg.Storage.ScanWorkers)
 	updater := index.NewUpdater(db)
@@ -79,7 +94,10 @@ func New(ctx context.Context, cfg *config.Config, db *store.DB, log *slog.Logger
 
 	// Each capability stays unadvertised until it is implemented: announcing
 	// one early puts a control in the client that then fails.
-	features := ocs.Features{Trashbin: false, Versioning: false, Chunking: true, Push: true}
+	features := ocs.Features{
+		Trashbin: false, Versioning: false, Chunking: true, Push: true,
+		Previews: cfg.Preview.Enabled,
+	}
 
 	usage := func(ctx context.Context, u store.User) (int64, error) {
 		return store.UserUsage(ctx, db, u.ID)
@@ -124,6 +142,7 @@ func New(ctx context.Context, cfg *config.Config, db *store.DB, log *slog.Logger
 		auth: authenticator, loginFlow: loginFlow, ocs: ocsService,
 		storage: storage, scanner: scanner, watcher: watcher,
 		dav: davHandler, uploads: uploadHandler, push: pushHub, admin: adminPage,
+		previews: previews, previewCache: previewCache,
 	}
 	s.http = &http.Server{
 		Addr:    cfg.Server.Listen,
@@ -210,6 +229,14 @@ func (s *Server) routes() http.Handler {
 		mux.Handle("GET "+v.prefix+"/search/providers/{providerId}/search",
 			protected(s.ocs.Search(v.version)))
 	}
+	// Previews. Advertised only when they are on, so a client does not offer a
+	// gallery view whose tiles would all be blank.
+	if s.previews != nil {
+		mux.Handle("GET "+preview.Path, protected(s.previews))
+		mux.Handle("HEAD "+preview.Path, protected(s.previews))
+		mux.Handle("GET "+preview.Path+".png", protected(s.previews))
+	}
+
 	// The browser view. Search results land here when a client cannot open the
 	// file locally, which on macOS under the File Provider integration is
 	// always: that mode registers no classic sync folders, so the client's
@@ -297,6 +324,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	go s.prunePairingSessions(ctx)
 	go s.pruneUploads(ctx)
+	go s.prunePreviews(ctx)
 	go s.rescan(ctx)
 	go s.watch(ctx)
 
@@ -467,6 +495,45 @@ func (s *Server) watch(ctx context.Context) {
 // abandonedUploadTTL is how long an untouched transfer is kept. It matches the
 // window Nextcloud allows, and clients do not expect to resume beyond it.
 const abandonedUploadTTL = 24 * time.Hour
+
+// previewPruneInterval is how often the preview cache is swept. Daily: the
+// entries are small and the sweep only walks Mirage's own directory, but there
+// is no reason to do it more often than the age bound changes anything.
+const previewPruneInterval = 24 * time.Hour
+
+// prunePreviews discards previews nothing has asked for in a while.
+//
+// Editing or deleting a photograph leaves its previews unreachable rather than
+// removed - the key includes the file's ETag - so without this the cache only
+// ever grows.
+func (s *Server) prunePreviews(ctx context.Context) {
+	maxAge := s.cfg.Preview.MaxAge.Duration()
+	if s.previewCache == nil || maxAge <= 0 {
+		return
+	}
+	sweep := func() {
+		removed, freed, err := s.previewCache.Prune(maxAge)
+		if err != nil {
+			s.log.Warn("could not finish sweeping the preview cache", "error", err)
+		}
+		if removed > 0 {
+			s.log.Info("swept the preview cache",
+				"removed", removed, "freed_bytes", freed, "older_than", maxAge)
+		}
+	}
+
+	timer := time.NewTimer(previewPruneInterval)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			sweep()
+			timer.Reset(previewPruneInterval)
+		}
+	}
+}
 
 // uploadPruneInterval is how often abandoned transfers are swept.
 const uploadPruneInterval = time.Hour

@@ -25,6 +25,7 @@ type Config struct {
 	Server   Server   `yaml:"server"`
 	Database Database `yaml:"database"`
 	Storage  Storage  `yaml:"storage"`
+	Preview  Preview  `yaml:"preview"`
 	// Users is optional; see the note on User. An empty list means accounts are
 	// managed through the admin page instead.
 	Users []User `yaml:"users"`
@@ -108,6 +109,27 @@ type Storage struct {
 	Exclude []string `yaml:"exclude"`
 }
 
+// Preview configures the small images shown instead of file icons.
+type Preview struct {
+	// Enabled turns previews on. With it off the endpoint reports that a file
+	// has no preview, and clients draw their own icons.
+	Enabled bool `yaml:"enabled"`
+	// CacheDir holds generated previews. It is Mirage's own directory, not
+	// anybody's files: a folder of thumbnails inside a home would sync to every
+	// device and count against that person's quota.
+	CacheDir string `yaml:"cache_dir"`
+	// Concurrency bounds how many previews are made at once.
+	//
+	// Making one reads a whole photograph off the disk, and a phone scrolling a
+	// gallery asks for dozens at a time. Left unbounded they would all seek at
+	// once, which is the same disk load the scanner takes such care to avoid.
+	Concurrency int `yaml:"concurrency"`
+	// MaxAge discards previews nothing has asked for in this long. Zero keeps
+	// them forever, which on a large share is how a cache quietly fills a
+	// volume.
+	MaxAge Duration `yaml:"max_age"`
+}
+
 // User maps a Mirage account onto a directory on the NAS filesystem.
 //
 // Declaring users here is optional. When the list is empty, accounts are
@@ -144,6 +166,12 @@ func Default() Config {
 			RescanInterval:      Duration(6 * time.Hour),
 			QuickRescanInterval: Duration(5 * time.Minute),
 			Watcher:             true,
+		},
+		Preview: Preview{
+			Enabled:     true,
+			CacheDir:    "/var/lib/mirage/previews",
+			Concurrency: 4,
+			MaxAge:      Duration(90 * 24 * time.Hour),
 		},
 	}
 }
@@ -209,6 +237,17 @@ func (c *Config) Validate() error {
 	}
 	if c.Storage.ScanWorkers < 0 {
 		return fmt.Errorf("storage.scan_workers must not be negative (use 0 to derive it)")
+	}
+	if c.Preview.Enabled {
+		if c.Preview.CacheDir == "" {
+			return fmt.Errorf("preview.cache_dir must be set when previews are enabled")
+		}
+		if c.Preview.Concurrency < 0 {
+			return fmt.Errorf("preview.concurrency must not be negative")
+		}
+		if c.Preview.MaxAge < 0 {
+			return fmt.Errorf("preview.max_age must not be negative (use 0 to keep them forever)")
+		}
 	}
 	// Compiled here so a malformed pattern is a startup error rather than
 	// something that silently matches nothing for the life of the server.

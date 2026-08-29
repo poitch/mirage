@@ -128,3 +128,24 @@ storage:
 #     uid: 1026
 #     gid: 100
 #     quota: 107374182400   # 100 GiB; omit or set 0 for unlimited
+
+# Thumbnails shown by the mobile apps and the browser view instead of file
+# icons. They are made only when something asks for one, never in a sweep:
+# generating them for a whole share would mean reading every photograph on it.
+preview:
+  enabled: true
+
+  # Where generated previews are kept. Mirage's own directory, not anybody's
+  # files - a folder of thumbnails inside a home would sync to every device and
+  # count against that person's quota.
+  cache_dir: /var/lib/mirage/previews
+
+  # How many previews may be made at once. Each one reads a whole photograph off
+  # the disk, and a phone scrolling a gallery asks for dozens at a time; left
+  # unbounded they would all seek at once.
+  concurrency: 4
+
+  # Previews nothing has asked for in this long are discarded. Editing a photo
+  # leaves its old previews unreachable rather than deleted, so without this the
+  # cache only grows. Zero keeps them forever.
+  max_age: 2160h

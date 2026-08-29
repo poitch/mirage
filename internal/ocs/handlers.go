@@ -45,6 +45,10 @@ type Features struct {
 	Chunking bool
 	// Push advertises the notify_push websocket.
 	Push bool
+	// Previews advertises that thumbnails can be fetched. With it off, clients
+	// draw their own file-type icons instead of asking for pictures that would
+	// come back empty.
+	Previews bool
 }
 
 // NewService builds the OCS service. advertisedVersion is the Nextcloud version
@@ -64,6 +68,28 @@ func NewService(advertisedVersion, externalURL string, features Features, a *aut
 	s.externalURL = strings.TrimRight(externalURL, "/")
 	return s, nil
 }
+
+// previewCapabilities describes the thumbnail endpoint, or nil when previews
+// are off.
+func (s *Service) previewCapabilities() *previewCaps {
+	if !s.features.Previews {
+		return nil
+	}
+	return &previewCaps{
+		Enabled: true,
+		MaxX:    previewMaxSize,
+		MaxY:    previewMaxSize,
+		// Named explicitly rather than claiming everything: a client that knows
+		// a HEIC has no preview here can draw its icon straight away instead of
+		// asking and waiting for a 404.
+		Supported: []string{"image/jpeg", "image/png", "image/gif"},
+	}
+}
+
+// previewMaxSize mirrors the largest preview the preview package will make.
+// Duplicated as a constant rather than imported, because the OCS layer
+// describing what another package does is the wrong direction for a dependency.
+const previewMaxSize = 1024
 
 // pushCapabilities builds the notify_push advertisement, or nil when push is
 // unavailable.
@@ -152,6 +178,7 @@ type capabilities struct {
 	Core       coreCaps        `xml:"core" json:"core"`
 	DAV        davCaps         `xml:"dav" json:"dav"`
 	Files      filesCaps       `xml:"files" json:"files"`
+	Previews   *previewCaps    `xml:"files_previews,omitempty" json:"files_previews,omitempty"`
 	Checksums  checksumCaps    `xml:"checksums" json:"checksums"`
 	NotifyPush *notifyPushCaps `xml:"notify_push,omitempty" json:"notify_push,omitempty"`
 }
@@ -194,6 +221,18 @@ type filesCaps struct {
 	Versioning      bool `xml:"versioning" json:"versioning"`
 }
 
+// previewCaps describes the thumbnail endpoint.
+//
+// Advertised so that a client which reads this does not offer a gallery whose
+// tiles would all come back empty. Clients that ignore it simply ask and get a
+// 404 for anything with no preview, which is the same answer.
+type previewCaps struct {
+	Enabled   bool     `xml:"enabled" json:"enabled"`
+	MaxX      int      `xml:"maxX" json:"maxX"`
+	MaxY      int      `xml:"maxY" json:"maxY"`
+	Supported []string `xml:"supportedMimeTypes>element" json:"supportedMimeTypes"`
+}
+
 type checksumCaps struct {
 	SupportedTypes      []string `xml:"supportedTypes>element" json:"supportedTypes"`
 	PreferredUploadType string   `xml:"preferredUploadType" json:"preferredUploadType"`
@@ -210,7 +249,8 @@ func (s *Service) Capabilities(v Version) http.HandlerFunc {
 					WebDAVRoot:   "remote.php/webdav",
 					Bruteforce:   bruteforce{Delay: 0},
 				},
-				DAV: davCaps{Chunking: chunkingValue(s.features.Chunking)},
+				DAV:      davCaps{Chunking: chunkingValue(s.features.Chunking)},
+				Previews: s.previewCapabilities(),
 				Files: filesCaps{
 					BigFileChunking: s.features.Chunking,
 					Undelete:        s.features.Trashbin,
