@@ -30,6 +30,86 @@ func SubstringPattern(term string) string {
 // account, which is slow but rare - and still correct, which matters more.
 const trigramMin = 3
 
+// SearchQuery is a compiled search: a condition over an account's entries, and
+// how to order and bound the answer.
+type SearchQuery struct {
+	Scope string
+	// Where is a SQL fragment over the nodes table, with Args to bind. Empty
+	// matches everything in the scope.
+	Where string
+	Args  []any
+	// NameLiterals are substrings the name must contain. They are a prefilter
+	// only: the condition above still decides the answer, so the index being
+	// wrong or incomplete cannot change the result, only the speed.
+	NameLiterals []string
+	// Order is a whitelisted SQL fragment. Empty orders by path.
+	Order string
+	// After continues from a previous page. Only meaningful when ordering by
+	// path, which is the only order with a keyset cursor.
+	After string
+	Limit int
+}
+
+// Search runs a compiled query.
+func Search(ctx context.Context, q Querier, userID int64, sq SearchQuery) ([]Node, error) {
+	where := []string{"nodes.user_id = ?"}
+	args := []any{userID}
+
+	if sq.Where != "" {
+		where = append(where, sq.Where)
+		args = append(args, sq.Args...)
+	}
+	if sq.Scope != "." && sq.Scope != "" {
+		lo, hi, ok := PrefixRange(sq.Scope + "/")
+		if !ok {
+			return nil, nil
+		}
+		where = append(where, "nodes.path >= ?", "nodes.path < ?")
+		args = append(args, lo, hi)
+	} else {
+		where = append(where, "nodes.path <> '.'")
+	}
+	if sq.After != "" {
+		where = append(where, "nodes.path > ?")
+		args = append(args, sq.After)
+	}
+
+	from := "nodes"
+	if match, ok := matchAll(sq.NameLiterals); ok {
+		from = "nodes JOIN node_names ON node_names.rowid = nodes.id"
+		where = append([]string{"node_names MATCH ?"}, where...)
+		args = append([]any{match}, args...)
+	}
+
+	order := sq.Order
+	if order == "" {
+		order = "nodes.path"
+	}
+	args = append(args, sq.Limit)
+
+	rows, err := q.QueryContext(ctx, `
+		SELECT `+qualifiedNodeColumns+` FROM `+from+`
+		WHERE `+strings.Join(where, " AND ")+`
+		ORDER BY `+order+`
+		LIMIT ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	return collectNodes(rows)
+}
+
+// matchAll builds a trigram query requiring every literal to be present.
+func matchAll(literals []string) (string, bool) {
+	if len(literals) == 0 {
+		return "", false
+	}
+	phrases := make([]string, 0, len(literals))
+	for _, l := range literals {
+		phrases = append(phrases, `"`+strings.ReplaceAll(l, `"`, `""`)+`"`)
+	}
+	return strings.Join(phrases, " AND "), true
+}
+
 // SearchNodes finds entries whose name matches a LIKE pattern, within a scope.
 //
 // The match is on the name rather than the full path, which is what somebody
@@ -84,6 +164,21 @@ func SearchNodes(ctx context.Context, q Querier, userID int64, scope, pattern, a
 		return nil, err
 	}
 	return collectNodes(rows)
+}
+
+// LikeLiterals returns the stretches of ordinary text in a LIKE pattern that
+// are long enough for the trigram index to find.
+//
+// Exported so that a caller compiling a larger query can collect the parts of
+// it the index can help with, and pass them back as a prefilter.
+func LikeLiterals(pattern string) []string {
+	var out []string
+	for _, run := range literalRuns(pattern) {
+		if len([]rune(run)) >= trigramMin {
+			out = append(out, run)
+		}
+	}
+	return out
 }
 
 // matchQuery turns a LIKE pattern into a trigram query that matches at least

@@ -709,8 +709,48 @@ func (s *Scanner) scanAll(ctx context.Context, reason string, quick bool) error 
 // contentType guesses a MIME type from a filename. Clients use it for icons and
 // previews, so a wrong guess is cosmetic.
 func contentType(name string) string {
-	if ct := mime.TypeByExtension(strings.ToLower(path.Ext(name))); ct != "" {
+	ext := strings.ToLower(path.Ext(name))
+	if ct, ok := extraMediaTypes[ext]; ok {
+		return ct
+	}
+	if ct := mime.TypeByExtension(ext); ct != "" {
 		return ct
 	}
 	return "application/octet-stream"
+}
+
+// extraMediaTypes fills the gaps in the standard table.
+//
+// Go's built-in list has no entry for HEIC, and a container has no system
+// mime.types file to fall back on, so every photograph an iPhone has taken
+// since 2017 was being recorded as an anonymous blob. That is not cosmetic: the
+// media view in the mobile apps finds pictures by searching for a content type
+// beginning "image/", so without these it finds nothing at all.
+//
+// Consulted before the standard table so the answer does not depend on which
+// mime.types file happens to be present on the host.
+var extraMediaTypes = map[string]string{
+	".heic": "image/heic",
+	".heif": "image/heif",
+	".hif":  "image/heif",
+	".avif": "image/avif",
+	".webp": "image/webp",
+	".jxl":  "image/jxl",
+	".dng":  "image/x-adobe-dng",
+	".cr2":  "image/x-canon-cr2",
+	".cr3":  "image/x-canon-cr3",
+	".nef":  "image/x-nikon-nef",
+	".arw":  "image/x-sony-arw",
+	".orf":  "image/x-olympus-orf",
+	".raf":  "image/x-fuji-raf",
+	".rw2":  "image/x-panasonic-rw2",
+	".mov":  "video/quicktime",
+	".mp4":  "video/mp4",
+	".m4v":  "video/x-m4v",
+	".mkv":  "video/x-matroska",
+	".webm": "video/webm",
+	".avi":  "video/x-msvideo",
+	".3gp":  "video/3gpp",
+	".mts":  "video/mp2t",
+	".m2ts": "video/mp2t",
 }

@@ -3,9 +3,14 @@ package server
 import (
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/poitch/mirage/internal/store"
 )
 
 // searchBody builds the request the Nextcloud clients send, which is the shape
@@ -133,14 +138,15 @@ func TestSearchTakesAPlainTermAsASubstring(t *testing.T) {
 
 // TestSearchRejectsQueriesItCannotAnswer: answering an unsupported query with
 // an empty multistatus would read as "no such file", which is worse than an
-// error the client can report.
+// error the client can report. Dropping the term instead would be worse still,
+// since it silently widens the result.
 func TestSearchRejectsQueriesItCannotAnswer(t *testing.T) {
 	h := newHarness(t)
 	body := `<?xml version="1.0"?>
-<d:searchrequest xmlns:d="DAV:"><d:basicsearch>
+<d:searchrequest xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:basicsearch>
   <d:select><d:prop><d:displayname/></d:prop></d:select>
   <d:from><d:scope><d:href>/files/alice</d:href><d:depth>infinity</d:depth></d:scope></d:from>
-  <d:where><d:gt><d:prop><d:getlastmodified/></d:prop><d:literal>2024-01-01</d:literal></d:gt></d:where>
+  <d:where><d:eq><d:prop><oc:favorite/></d:prop><d:literal>1</d:literal></d:eq></d:where>
 </d:basicsearch></d:searchrequest>`
 	resp := h.do("SEARCH", "/remote.php/dav", "alice", alicePassword, body,
 		map[string]string{"Content-Type": "text/xml"})
@@ -178,5 +184,145 @@ func TestSearchMatchesDirectories(t *testing.T) {
 	sort.Strings(hrefs)
 	if len(hrefs) != 1 || !strings.HasSuffix(hrefs[0], "/docs/nested/") {
 		t.Fatalf("search for nested returned %v, want the directory with a trailing slash", hrefs)
+	}
+}
+
+// mediaSearchBody is what the media view in the mobile apps sends: everything
+// that is a picture or a video, within a date range, newest first.
+func mediaSearchBody(scope string, limit int) string {
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<d:searchrequest xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns">
+  <d:basicsearch>
+    <d:select><d:prop><oc:fileid/><d:displayname/><d:getcontenttype/><d:getlastmodified/></d:prop></d:select>
+    <d:from><d:scope><d:href>%s</d:href><d:depth>infinity</d:depth></d:scope></d:from>
+    <d:where>
+      <d:and>
+        <!-- Media type filter -->
+        <d:or>
+          <d:like><d:prop><d:getcontenttype/></d:prop><d:literal>image/%%</d:literal></d:like>
+          <d:like><d:prop><d:getcontenttype/></d:prop><d:literal>video/%%</d:literal></d:like>
+        </d:or>
+        <d:gt><d:prop><d:getlastmodified/></d:prop><d:literal>2000-01-01T00:00:00Z</d:literal></d:gt>
+      </d:and>
+    </d:where>
+    <d:orderby>
+      <d:order><d:prop><d:getlastmodified/></d:prop><d:descending/></d:order>
+    </d:orderby>
+    <d:limit><d:nresults>%d</d:nresults></d:limit>
+  </d:basicsearch>
+</d:searchrequest>`, scope, limit)
+}
+
+// TestMediaSearchFindsPicturesAndVideos is the query behind the media view. It
+// was answered 501 before, which is why that view was empty.
+func TestMediaSearchFindsPicturesAndVideos(t *testing.T) {
+	h := newHarness(t)
+	writePhoto(t, filepath.Join(h.homes["alice"], "beach.jpg"), 60, 40)
+	// Recorded by extension, so these need no real contents to be found.
+	writeFile(t, filepath.Join(h.homes["alice"], "clip.mov"), "not really a video")
+	writeFile(t, filepath.Join(h.homes["alice"], "phone.heic"), "not really a photo")
+	writeFile(t, filepath.Join(h.homes["alice"], "notes.txt"), "text")
+	if err := h.server.scanner.ScanAll(t.Context(), "test"); err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+
+	resp := h.do("SEARCH", "/remote.php/dav", "alice", alicePassword,
+		mediaSearchBody("/files/alice", 100), map[string]string{"Content-Type": "text/xml"})
+	body := readBody(t, resp)
+	if resp.StatusCode != http.StatusMultiStatus {
+		t.Fatalf("status = %d, want 207: %s", resp.StatusCode, body)
+	}
+	doc := parseMultistatus(t, body)
+	got := strings.Join(doc.hrefs(), " ")
+
+	for _, want := range []string{"beach.jpg", "clip.mov", "phone.heic"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the media search did not find %s: %v", want, doc.hrefs())
+		}
+	}
+	if strings.Contains(got, "notes.txt") || strings.Contains(got, "hello.txt") {
+		t.Errorf("the media search returned things that are not media: %v", doc.hrefs())
+	}
+}
+
+// TestHEICIsRecognisedAsAnImage: Go's table has no entry for it, so without a
+// correction every iPhone photograph is an anonymous blob and the media view
+// finds none of them.
+func TestHEICIsRecognisedAsAnImage(t *testing.T) {
+	h := newHarness(t)
+	for name, want := range map[string]string{
+		"phone.heic": "image/heic",
+		"clip.mov":   "video/quicktime",
+		"raw.dng":    "image/x-adobe-dng",
+	} {
+		writeFile(t, filepath.Join(h.homes["alice"], name), "x")
+		_ = want
+	}
+	if err := h.server.scanner.ScanAll(t.Context(), "test"); err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+	for name, want := range map[string]string{
+		"phone.heic": "image/heic",
+		"clip.mov":   "video/quicktime",
+		"raw.dng":    "image/x-adobe-dng",
+	} {
+		n, err := store.NodeByPath(t.Context(), h.db, aliceID(t, h), name)
+		if err != nil {
+			t.Fatalf("look up %s: %v", name, err)
+		}
+		if n.ContentType != want {
+			t.Errorf("%s has content type %q, want %q", name, n.ContentType, want)
+		}
+	}
+}
+
+// TestMediaSearchIsScopedToTheAccount: the query names no account, so only the
+// scope check confines it.
+func TestMediaSearchIsScopedToTheAccount(t *testing.T) {
+	h := newHarness(t)
+	writePhoto(t, filepath.Join(h.homes["bob"], "bobs-photo.jpg"), 40, 40)
+	if err := h.server.scanner.ScanAll(t.Context(), "test"); err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+
+	resp := h.do("SEARCH", "/remote.php/dav", "alice", alicePassword,
+		mediaSearchBody("/files/alice", 100), map[string]string{"Content-Type": "text/xml"})
+	body := readBody(t, resp)
+	if strings.Contains(body, "bobs-photo.jpg") {
+		t.Errorf("the media search returned another account's photo:\n%s", body)
+	}
+}
+
+// TestSearchOrdersNewestFirst, which is what a gallery shows.
+func TestSearchOrdersNewestFirst(t *testing.T) {
+	h := newHarness(t)
+	base := time.Now().Add(-72 * time.Hour)
+	for i, name := range []string{"old.jpg", "middle.jpg", "new.jpg"} {
+		p := filepath.Join(h.homes["alice"], name)
+		writePhoto(t, p, 30, 30)
+		when := base.Add(time.Duration(i) * 24 * time.Hour)
+		if err := os.Chtimes(p, when, when); err != nil {
+			t.Fatalf("chtimes: %v", err)
+		}
+	}
+	if err := h.server.scanner.ScanAll(t.Context(), "test"); err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+
+	resp := h.do("SEARCH", "/remote.php/dav", "alice", alicePassword,
+		mediaSearchBody("/files/alice", 100), map[string]string{"Content-Type": "text/xml"})
+	doc := parseMultistatus(t, readBody(t, resp))
+
+	var order []string
+	for _, href := range doc.hrefs() {
+		for _, name := range []string{"old.jpg", "middle.jpg", "new.jpg"} {
+			if strings.HasSuffix(href, name) {
+				order = append(order, name)
+			}
+		}
+	}
+	want := []string{"new.jpg", "middle.jpg", "old.jpg"}
+	if strings.Join(order, ",") != strings.Join(want, ",") {
+		t.Errorf("order = %v, want newest first %v", order, want)
 	}
 }

@@ -263,6 +263,19 @@ func TestSearchIndexDoesNotChurnOnRescan(t *testing.T) {
 	}
 }
 
+// migrationCreating finds the migration that creates a named object.
+func migrationCreating(t *testing.T, object string) string {
+	t.Helper()
+	for _, m := range migrations {
+		if strings.Contains(m, "CREATE VIRTUAL TABLE "+object) ||
+			strings.Contains(m, "CREATE TABLE "+object) {
+			return m
+		}
+	}
+	t.Fatalf("no migration creates %s", object)
+	return ""
+}
+
 // TestNodeColumnListsAgree: the two column lists are read by the same scanner,
 // so they must name the same columns in the same order.
 func TestNodeColumnListsAgree(t *testing.T) {
@@ -293,9 +306,9 @@ func TestSearchIndexBackfillsExistingRows(t *testing.T) {
 		}
 	}
 
-	// The search index migration is the last one; running it again is what an
-	// upgrade does.
-	if _, err := db.ExecContext(ctx, migrations[len(migrations)-1]); err != nil {
+	// Found by what it does rather than by position, so adding a later
+	// migration does not quietly make this test exercise the wrong one.
+	if _, err := db.ExecContext(ctx, migrationCreating(t, "node_names")); err != nil {
 		t.Fatalf("re-apply the search migration: %v", err)
 	}
 

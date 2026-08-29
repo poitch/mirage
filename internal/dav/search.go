@@ -2,10 +2,8 @@ package dav
 
 import (
 	"encoding/xml"
-	"html"
 	"io"
 	"net/http"
-	"regexp"
 	"strings"
 
 	"github.com/poitch/mirage/internal/auth"
@@ -40,33 +38,14 @@ type searchRequest struct {
 		Where struct {
 			Inner string `xml:",innerxml"`
 		} `xml:"DAV: where"`
+		OrderBy struct {
+			Inner string `xml:",innerxml"`
+		} `xml:"DAV: orderby"`
 		Limit struct {
 			NResults int `xml:"DAV: nresults"`
 		} `xml:"DAV: limit"`
 	} `xml:"DAV: basicsearch"`
 }
-
-// literalRe pulls the pattern a search is looking for out of the where clause.
-//
-// The where clause is a small expression language of nested comparisons. Rather
-// than implement it, Mirage takes the pattern out of it and matches names.
-// That is what the search boxes in the clients ask for - somebody typing part
-// of a filename - and answering that well is worth more than answering every
-// expressible query badly. Anything else is reported as unsupported rather than
-// quietly returning nothing, which a person would read as "it is not there".
-var literalRe = regexp.MustCompile(`(?s)<(?:\w+:)?literal[^>]*>(.*?)</(?:\w+:)?literal>`)
-
-// propRe finds which properties a where clause compares against.
-var propRe = regexp.MustCompile(`<(?:\w+:)?(displayname|getcontenttype|getlastmodified|fileid|is-collection)\s*/?>`)
-
-// maxPatternLen bounds the pattern. A long one full of wildcards makes LIKE
-// backtrack, and no real search box produces one.
-const maxPatternLen = 256
-
-// Searching by name is served by a trigram index, so a term of three
-// characters or more is found without reading the account. A shorter one has
-// no index entry to look up and falls back to reading every row - correct, but
-// slow on a large share.
 
 // handleSearch answers a WebDAV SEARCH.
 func (h *Handler) handleSearch(w http.ResponseWriter, r *http.Request) {
@@ -91,13 +70,22 @@ func (h *Handler) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pattern, ok := searchPattern(req.Basic.Where.Inner)
-	if !ok {
-		// Better to say so than to answer an unsupported query with an empty
-		// result, which a person reads as "it is not there".
+	// The where clause is compiled to SQL rather than evaluated here: filtering
+	// in Go would mean reading every entry in the account to throw most of them
+	// away, and the media view in the mobile apps searches the whole share.
+	cond, err := compileWhere(req.Basic.Where.Inner)
+	if err != nil {
+		// Said plainly rather than answered with an empty result, which a
+		// person reads as "there is nothing there".
 		h.log.Warn("unsupported SEARCH query",
-			"user", user.Username, "where", truncateForLog(req.Basic.Where.Inner))
-		http.Error(w, "this server supports searching by name", http.StatusNotImplemented)
+			"user", user.Username, "error", err, "where", truncateForLog(req.Basic.Where.Inner))
+		http.Error(w, "this server cannot answer that search: "+err.Error(),
+			http.StatusNotImplemented)
+		return
+	}
+	order, err := orderClause(req.Basic.OrderBy.Inner)
+	if err != nil {
+		http.Error(w, "this server cannot order a search that way", http.StatusNotImplemented)
 		return
 	}
 
@@ -116,7 +104,14 @@ func (h *Handler) handleSearch(w http.ResponseWriter, r *http.Request) {
 		props = allPropNames
 	}
 
-	matches, err := store.SearchNodes(r.Context(), h.db, user.ID, scope, pattern, "", limit)
+	matches, err := store.Search(r.Context(), h.db, user.ID, store.SearchQuery{
+		Scope:        scope,
+		Where:        cond.SQL,
+		Args:         cond.Args,
+		NameLiterals: cond.NameLiterals,
+		Order:        order,
+		Limit:        limit,
+	})
 	if err != nil {
 		h.internalError(w, "search", err)
 		return
@@ -128,7 +123,7 @@ func (h *Handler) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.log.Debug("search",
-		"user", user.Username, "scope", scope, "pattern", pattern, "results", len(matches))
+		"user", user.Username, "scope", scope, "results", len(matches))
 
 	ms := newMultistatus(w)
 	for _, n := range matches {
@@ -166,38 +161,6 @@ func (h *Handler) searchScope(req searchRequest, user store.User) (string, bool)
 		return "", false
 	}
 	return scope, true
-}
-
-// searchPattern extracts the pattern being searched for.
-//
-// A DAV literal in a d:like carries the same wildcards as SQL LIKE - % and _,
-// escaped with a backslash - so it is passed through rather than reinterpreted.
-// The clients send %term%. A pattern with no wildcards at all is taken as a
-// substring search, which is what somebody typing into a box means even if
-// their client sent it literally.
-func searchPattern(where string) (string, bool) {
-	if strings.TrimSpace(where) == "" {
-		return "", false
-	}
-	// Only name searches are answered; a query about content types or dates
-	// would need the expression language this deliberately does not implement.
-	for _, p := range propRe.FindAllStringSubmatch(where, -1) {
-		if p[1] != "displayname" {
-			return "", false
-		}
-	}
-	m := literalRe.FindStringSubmatch(where)
-	if m == nil {
-		return "", false
-	}
-	pattern := html.UnescapeString(m[1])
-	if strings.TrimSpace(pattern) == "" || len(pattern) > maxPatternLen {
-		return "", false
-	}
-	if !strings.ContainsAny(pattern, "%_") {
-		pattern = "%" + pattern + "%"
-	}
-	return pattern, true
 }
 
 func truncateForLog(s string) string {

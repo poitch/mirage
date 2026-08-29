@@ -223,6 +223,39 @@ END;
 
 INSERT INTO node_names(rowid, name) SELECT id, name FROM nodes;
 `,
+	// 9: give photographs and videos their real content types.
+	//
+	// Go's built-in table has no entry for HEIC, and a container has no system
+	// mime.types file to fall back on, so every iPhone photograph was indexed
+	// as an anonymous blob. The media view in the mobile apps finds pictures by
+	// searching for a content type beginning "image/", which meant it found
+	// none of them.
+	//
+	// Corrected here rather than left to the next scan, because a scan only
+	// rewrites entries whose file changed and these have not.
+	`
+UPDATE nodes SET content_type = 'image/heic'         WHERE lower(name) LIKE '%.heic';
+UPDATE nodes SET content_type = 'image/heif'         WHERE lower(name) LIKE '%.heif';
+UPDATE nodes SET content_type = 'image/heif'         WHERE lower(name) LIKE '%.hif';
+UPDATE nodes SET content_type = 'image/avif'         WHERE lower(name) LIKE '%.avif';
+UPDATE nodes SET content_type = 'image/webp'         WHERE lower(name) LIKE '%.webp';
+UPDATE nodes SET content_type = 'image/jxl'          WHERE lower(name) LIKE '%.jxl';
+UPDATE nodes SET content_type = 'image/x-adobe-dng'  WHERE lower(name) LIKE '%.dng';
+UPDATE nodes SET content_type = 'image/x-canon-cr2'  WHERE lower(name) LIKE '%.cr2';
+UPDATE nodes SET content_type = 'image/x-canon-cr3'  WHERE lower(name) LIKE '%.cr3';
+UPDATE nodes SET content_type = 'image/x-nikon-nef'  WHERE lower(name) LIKE '%.nef';
+UPDATE nodes SET content_type = 'image/x-sony-arw'   WHERE lower(name) LIKE '%.arw';
+UPDATE nodes SET content_type = 'video/quicktime'    WHERE lower(name) LIKE '%.mov';
+UPDATE nodes SET content_type = 'video/mp4'          WHERE lower(name) LIKE '%.mp4';
+UPDATE nodes SET content_type = 'video/x-m4v'        WHERE lower(name) LIKE '%.m4v';
+UPDATE nodes SET content_type = 'video/x-matroska'   WHERE lower(name) LIKE '%.mkv';
+UPDATE nodes SET content_type = 'video/webm'         WHERE lower(name) LIKE '%.webm';
+UPDATE nodes SET content_type = 'video/x-msvideo'    WHERE lower(name) LIKE '%.avi';
+UPDATE nodes SET content_type = 'video/mp2t'         WHERE lower(name) LIKE '%.mts';
+UPDATE nodes SET content_type = 'video/mp2t'         WHERE lower(name) LIKE '%.m2ts';
+
+CREATE INDEX idx_nodes_content_type ON nodes(user_id, content_type);
+`,
 }
 
 // migrate applies any migrations the database has not yet seen.
