@@ -98,3 +98,24 @@ func (db *DB) ListAppPasswords(ctx context.Context, userID int64) ([]AppPassword
 
 // ErrNoRowsAffected signals an update that matched nothing.
 var ErrNoRowsAffected = errors.New("no rows affected")
+
+// DeleteAppPasswordByID revokes one device credential.
+//
+// By id rather than by token, because a person revoking a device from a list
+// has its name and not its secret - the secret was shown once and is gone.
+// Scoped to the account so an id from elsewhere revokes nothing.
+func (db *DB) DeleteAppPasswordByID(ctx context.Context, userID, id int64) error {
+	res, err := db.ExecContext(ctx,
+		`DELETE FROM app_passwords WHERE user_id = ? AND id = ?`, userID, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}

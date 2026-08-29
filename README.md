@@ -39,9 +39,11 @@ Early development. Milestone progress:
 ## The web view
 
 There is a small browser view at `/web/`, and account holders sign in to it with
-their own Mirage credentials. It browses folders and downloads files, and that
-is all it does &mdash; Mirage is a sync server, and the clients are how you work
-with your files.
+their own Mirage credentials. It browses folders, shows thumbnails, searches by
+filename, restores deleted files and earlier versions, and lets somebody change
+their own password or add a device without an administrator in the room. It does
+not edit, upload or share &mdash; Mirage is a sync server, and the clients are
+how you work with your files.
 
 It exists because a search result has to lead somewhere. Clicking one in the
 desktop client normally opens the file locally without involving the server at

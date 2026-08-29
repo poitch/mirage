@@ -1,4 +1,4 @@
-package admin
+package qrcode
 
 import (
 	"regexp"
@@ -11,7 +11,7 @@ import (
 
 func TestQRSVG(t *testing.T) {
 	const text = "nc://login/server:https://mirage.example.com&user:alice&password:abc123"
-	svg, err := qrSVG(text)
+	svg, err := SVG(text)
 	if err != nil {
 		t.Fatalf("qrSVG: %v", err)
 	}
@@ -38,7 +38,7 @@ func TestQRSVG(t *testing.T) {
 		t.Fatal("empty QR matrix")
 	}
 	// The margin has to be outside the matrix on both sides.
-	if !strings.Contains(s, "0 0 "+itoa(int64(code.Size+8))) {
+	if !strings.Contains(s, "0 0 "+strconv.Itoa(code.Size+8)) {
 		t.Errorf("viewBox does not include the quiet margin; got %.80s", s)
 	}
 }
@@ -46,7 +46,7 @@ func TestQRSVG(t *testing.T) {
 func TestQRSVGRejectsOversizedInput(t *testing.T) {
 	// Beyond what any QR version can hold; better an error than a code that
 	// silently encodes nothing useful.
-	if _, err := qrSVG(strings.Repeat("x", 10000)); err == nil {
+	if _, err := SVG(strings.Repeat("x", 10000)); err == nil {
 		t.Error("an input too large to encode was accepted")
 	}
 }
@@ -66,7 +66,7 @@ func TestQRSVGMatchesTheMatrix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	svg, err := qrSVG(text)
+	svg, err := SVG(text)
 	if err != nil {
 		t.Fatalf("qrSVG: %v", err)
 	}

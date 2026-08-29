@@ -15,7 +15,10 @@ import (
 
 	"github.com/poitch/mirage/internal/auth"
 	"github.com/poitch/mirage/internal/fsx"
+	"github.com/poitch/mirage/internal/index"
+	"github.com/poitch/mirage/internal/preview"
 	"github.com/poitch/mirage/internal/store"
+	"github.com/poitch/mirage/internal/versions"
 )
 
 //go:embed templates/*.html
@@ -46,11 +49,38 @@ type Site struct {
 	tmpl     *template.Template
 	sessions *sessionStore
 	secure   bool
+	// externalURL is how a device reaches this server, which is what a sign-in
+	// code has to carry.
+	externalURL string
+	// previews turns thumbnails on. Nil leaves listings showing icons.
+	previews *preview.Handler
+	// scanner and updater keep the index in step with what this page changes,
+	// so a restored file is visible to clients at once rather than at the next
+	// scan - which would look like the restore had failed.
+	scanner *index.Scanner
+	updater *index.Updater
+	// keeper puts earlier copies aside, shared with the sync endpoints so that
+	// restoring from here and from a phone leave the same history.
+	keeper *versions.Keeper
+	// trashRetention and versionsEnabled mirror what the sync endpoints allow,
+	// so the page never offers a control that would fail.
+	trashEnabled    bool
+	versionsEnabled bool
+}
+
+// SetFeatures tells the page which of the optional features are on, so it can
+// stop offering the ones that are not.
+func (s *Site) SetFeatures(trash bool, keeper *versions.Keeper, previews *preview.Handler) {
+	s.trashEnabled = trash
+	s.keeper = keeper
+	s.versionsEnabled = keeper.Enabled()
+	s.previews = previews
 }
 
 // New builds the browser view. secure marks the session cookie Secure, which is
 // correct behind TLS and would make signing in impossible without it.
-func New(db *store.DB, a *auth.Authenticator, storage *fsx.Manager, externalURL string,
+func New(db *store.DB, a *auth.Authenticator, storage *fsx.Manager,
+	scanner *index.Scanner, updater *index.Updater, externalURL string,
 	log *slog.Logger) (*Site, error) {
 
 	tmpl, err := template.ParseFS(templateFS, "templates/*.html")
@@ -59,8 +89,10 @@ func New(db *store.DB, a *auth.Authenticator, storage *fsx.Manager, externalURL 
 	}
 	return &Site{
 		db: db, auth: a, storage: storage, log: log, tmpl: tmpl,
-		sessions: newSessionStore(),
-		secure:   strings.HasPrefix(externalURL, "https://"),
+		scanner: scanner, updater: updater,
+		sessions:    newSessionStore(),
+		secure:      strings.HasPrefix(externalURL, "https://"),
+		externalURL: strings.TrimRight(externalURL, "/"),
 	}, nil
 }
 
@@ -75,6 +107,21 @@ func (s *Site) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST "+logoutPath, s.logout)
 	mux.Handle("GET "+rootPath, s.guard(s.browse))
 	mux.Handle("GET "+downloadPath+"{path...}", s.guard(s.download))
+	mux.Handle("GET /web/search", s.guard(s.search))
+	mux.Handle("GET /web/thumb/{id}", s.guard(s.thumbnail))
+
+	mux.Handle("GET /web/trash", s.guard(s.trash))
+	mux.Handle("POST /web/trash/restore", s.guard(s.restoreTrash))
+	mux.Handle("POST /web/trash/delete", s.guard(s.deleteTrash))
+
+	mux.Handle("GET /web/versions/{id}", s.guard(s.versionsPage))
+	mux.Handle("GET /web/versions/{id}/{stamp}", s.guard(s.downloadVersion))
+	mux.Handle("POST /web/versions/restore", s.guard(s.restoreVersion))
+
+	mux.Handle("GET /web/profile", s.guard(s.profile))
+	mux.Handle("POST /web/profile/password", s.guard(s.changePassword))
+	mux.Handle("POST /web/profile/device", s.guard(s.addDevice))
+	mux.Handle("POST /web/profile/device/revoke", s.guard(s.revokeDevice))
 
 	// Where clients send a search result. Kept as its own route because it is
 	// the client's address, not this application's, and it carries dir and
@@ -114,13 +161,33 @@ func (s *Site) guard(h func(http.ResponseWriter, *http.Request, *session)) http.
 
 // pageData is what every template is given.
 type pageData struct {
-	Title    string
-	Username string
-	CSRF     string
-	Error    string
-	Next     string
-	Crumbs   []crumb
-	Entries  []entry
+	Title       string
+	Username    string
+	DisplayName string
+	CSRF        string
+	Error       string
+	Notice      string
+	Next        string
+	Crumbs      []crumb
+	Entries     []entry
+	Devices     []device
+
+	// Query and Searching drive the search box and its results.
+	Query     string
+	Searching bool
+
+	// QR and SetupURL carry a one-time device code. Held only for the render
+	// that produced them; the credential cannot be shown again.
+	QR       template.HTML
+	SetupURL template.URL
+
+	// The versions page describes one file.
+	FileID          int64
+	ParentURL       string
+	ParentName      string
+	DownloadURL     string
+	CurrentSize     string
+	CurrentModified string
 }
 
 type crumb struct {
@@ -136,6 +203,16 @@ type entry struct {
 	Size      string
 	Modified  string
 	Highlight bool
+	// Where names the folder an entry came from, shown when a listing is not
+	// itself a folder - search results and the trash.
+	Where string
+	// ThumbURL is set when a picture can be shown instead of an icon.
+	ThumbURL string
+	// VersionsURL is set when a file has earlier copies to look at.
+	VersionsURL string
+	// Token addresses the entry in a form post: a trash entry name, or a
+	// version timestamp.
+	Token string
 }
 
 func (s *Site) redirectToLogin(w http.ResponseWriter, r *http.Request) {
@@ -260,18 +337,8 @@ func (s *Site) renderFolder(w http.ResponseWriter, r *http.Request, sess *sessio
 
 	entries := make([]entry, 0, len(children))
 	for _, c := range children {
-		e := entry{
-			Name:      c.Name,
-			IsDir:     c.IsDir,
-			Size:      formatBytes(c.Size),
-			Modified:  c.MTime.Format("2 Jan 2006, 15:04"),
-			Highlight: highlight != "" && c.Name == highlight,
-		}
-		if c.IsDir {
-			e.URL = browseURL(c.Path, "")
-		} else {
-			e.URL = downloadURL(c.Path)
-		}
+		e := s.entryFor(sess, c)
+		e.Highlight = highlight != "" && c.Name == highlight
 		entries = append(entries, e)
 	}
 
@@ -279,6 +346,7 @@ func (s *Site) renderFolder(w http.ResponseWriter, r *http.Request, sess *sessio
 		Title:    titleFor(clean),
 		Username: sess.username,
 		CSRF:     sess.csrf,
+		Notice:   r.URL.Query().Get("notice"),
 		Crumbs:   crumbsFor(clean),
 		Entries:  entries,
 	})

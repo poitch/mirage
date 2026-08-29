@@ -14,6 +14,7 @@ import (
 	"github.com/poitch/mirage/internal/fsx"
 	"github.com/poitch/mirage/internal/index"
 	"github.com/poitch/mirage/internal/store"
+	"github.com/poitch/mirage/internal/versions"
 )
 
 // FilesPrefix is the WebDAV root for a user's files.
@@ -37,10 +38,9 @@ type Handler struct {
 	// because the DAV layer has no business knowing how previews are produced,
 	// only whether to tell a client one exists.
 	previewable func(name string) bool
-	// versions configures keeping earlier copies of overwritten files. A zero
-	// value means overwriting is final, and the versions endpoints are not
-	// served.
-	versions VersionPolicy
+	// versions keeps earlier copies of overwritten files. Nil means overwriting
+	// is final, and the versions endpoints are not served.
+	versions *versions.Keeper
 	// readOnly reflects what the server can currently honour. It drives both
 	// the advertised oc:permissions and which methods are allowed, so the two
 	// can never disagree.
@@ -54,21 +54,6 @@ func (h *Handler) SetTrashRetention(d time.Duration) { h.trashRetention = max(d,
 // TrashEnabled reports whether deletes are recoverable.
 func (h *Handler) TrashEnabled() bool { return h.trashRetention > 0 }
 
-// VersionPolicy says whether earlier copies of overwritten files are kept, and
-// what that is allowed to cost.
-type VersionPolicy struct {
-	Enabled bool
-	// Retention discards versions older than this.
-	Retention time.Duration
-	// MaxPerFile caps how many are kept for one file. A document saved every
-	// few minutes all day would otherwise accumulate hundreds of copies.
-	MaxPerFile int
-	// MaxFileSize is the largest file that gets a version at all. Keeping one
-	// means copying the file, so without a bound a single large video saved
-	// twice costs more than the rest of the account.
-	MaxFileSize int64
-}
-
 // SetPreviewable says which entries can be given a thumbnail. Passing nil
 // reports that none can, which is the correct answer when previews are off.
 func (h *Handler) SetPreviewable(f func(name string) bool) { h.previewable = f }
@@ -78,11 +63,11 @@ func (h *Handler) canPreview(node store.Node) bool {
 	return h.previewable != nil && !node.IsDir && h.previewable(node.Name)
 }
 
-// SetVersionPolicy turns versioning on and bounds what it costs.
-func (h *Handler) SetVersionPolicy(p VersionPolicy) { h.versions = p }
+// SetVersionKeeper turns versioning on. Passing nil makes overwriting final.
+func (h *Handler) SetVersionKeeper(k *versions.Keeper) { h.versions = k }
 
 // VersionsEnabled reports whether earlier copies are kept.
-func (h *Handler) VersionsEnabled() bool { return h.versions.Enabled }
+func (h *Handler) VersionsEnabled() bool { return h.versions.Enabled() }
 
 // NewHandler builds the files handler.
 func NewHandler(db *store.DB, storage *fsx.Manager, updater *index.Updater,

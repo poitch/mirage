@@ -1,39 +1,67 @@
 {{ template "head" . }}
 {{ template "nav" . }}
 <main>
-  <p class="crumbs">
-    {{ range .Crumbs }}
-      {{ if .Current }}<span class="here">{{ .Name }}</span>
-      {{ else }}<a href="{{ .URL }}">{{ .Name }}</a><span class="sep">/</span>{{ end }}
-    {{ end }}
-  </p>
+  {{ if .Notice }}<p class="banner ok">{{ .Notice }}</p>{{ end }}
+  {{ if .Error }}<p class="banner">{{ .Error }}</p>{{ end }}
+
+  <form class="search" method="get" action="/web/search">
+    <input name="q" value="{{ .Query }}" placeholder="Search your files by name"
+           autocapitalize="none" autocorrect="off" spellcheck="false">
+    <button type="submit">Search</button>
+  </form>
+
+  {{ if .Searching }}
+    <p class="crumbs">
+      {{ if .Entries }}Files matching <strong>{{ .Query }}</strong>
+      {{ else }}Nothing matches <strong>{{ .Query }}</strong>{{ end }}
+      <span class="sep">&middot;</span><a href="/web/">back to files</a>
+    </p>
+  {{ else }}
+    <p class="crumbs">
+      {{ range .Crumbs }}
+        {{ if .Current }}<span class="here">{{ .Name }}</span>
+        {{ else }}<a href="{{ .URL }}">{{ .Name }}</a><span class="sep">/</span>{{ end }}
+      {{ end }}
+    </p>
+  {{ end }}
 
   <div class="card">
     {{ if .Entries }}
     <table>
       <thead>
-        <tr><th>Name</th><th class="size">Size</th><th class="when">Modified</th></tr>
+        <tr>
+          <th>Name</th><th class="size">Size</th><th class="when">Modified</th><th></th>
+        </tr>
       </thead>
       <tbody>
         {{ range .Entries }}
-        <tr {{ if .Highlight }}class="hit" id="hit"{{ end }}>
+        <tr {{ if .Highlight }}class="hit"{{ end }}>
           <td>
-            <span class="icon">{{ if .IsDir }}&#128193;{{ else }}&#128196;{{ end }}</span>
-            <a href="{{ .URL }}"{{ if not .IsDir }} download{{ end }}>{{ .Name }}</a>
+            <span class="icon-cell">
+              {{ if .ThumbURL }}<img class="thumb" src="{{ .ThumbURL }}" alt="" loading="lazy">
+              {{ else }}<span class="icon">{{ if .IsDir }}&#128193;{{ else }}&#128196;{{ end }}</span>{{ end }}
+              <span class="label">
+                <a href="{{ .URL }}"{{ if not .IsDir }} download{{ end }}>{{ .Name }}</a>
+                {{ if .Where }}<br><span class="where">{{ .Where }}</span>{{ end }}
+              </span>
+            </span>
           </td>
           <td class="size">{{ if .IsDir }}&mdash;{{ else }}{{ .Size }}{{ end }}</td>
           <td class="when">{{ .Modified }}</td>
+          <td class="actions-cell">
+            {{ if .VersionsURL }}<a href="{{ .VersionsURL }}">Versions</a>{{ end }}
+          </td>
         </tr>
         {{ end }}
       </tbody>
     </table>
-    {{ else }}
+    {{ else if not .Searching }}
     <p class="empty">This folder is empty.</p>
     {{ end }}
   </div>
 
   <p class="note">
-    Mirage is a sync server. This page browses and downloads; to work with your
-    files, use the Nextcloud client.
+    Mirage is a sync server. This page browses, downloads and restores; to work
+    with your files, use the Nextcloud client.
   </p>
 </main>

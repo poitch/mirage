@@ -1,0 +1,51 @@
+{{ template "head" . }}
+{{ template "nav" . }}
+<main>
+  {{ if .Notice }}<p class="banner ok">{{ .Notice }}</p>{{ end }}
+  {{ if .Error }}<p class="banner">{{ .Error }}</p>{{ end }}
+
+  <p class="crumbs">
+    <a href="{{ .ParentURL }}">{{ .ParentName }}</a><span class="sep">/</span>
+    <span class="here">{{ .Title }}</span>
+  </p>
+
+  <div class="card">
+    <table>
+      <thead>
+        <tr><th>Version</th><th class="size">Size</th><th></th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Current</strong><br><span class="where">{{ .CurrentModified }}</span></td>
+          <td class="size">{{ .CurrentSize }}</td>
+          <td class="actions-cell"><a href="{{ .DownloadURL }}" download>Download</a></td>
+        </tr>
+        {{ range .Entries }}
+        <tr>
+          <td>{{ .Modified }}</td>
+          <td class="size">{{ .Size }}</td>
+          <td class="actions-cell">
+            <a href="{{ .URL }}" download>Download</a>
+            <form method="post" action="/web/versions/restore">
+              <input type="hidden" name="csrf" value="{{ $.CSRF }}">
+              <input type="hidden" name="file" value="{{ $.FileID }}">
+              <input type="hidden" name="version" value="{{ .Token }}">
+              <button class="link" type="submit">Restore</button>
+            </form>
+          </td>
+        </tr>
+        {{ end }}
+      </tbody>
+    </table>
+  </div>
+
+  <p class="note">
+    {{ if .Entries }}
+      Restoring keeps what is there now as another version, so nothing is lost
+      either way.
+    {{ else }}
+      This file has no earlier versions. One is kept each time it is
+      overwritten.
+    {{ end }}
+  </p>
+</main>

@@ -18,6 +18,7 @@ import (
 	"github.com/poitch/mirage/internal/avatar"
 	"github.com/poitch/mirage/internal/fsx"
 	"github.com/poitch/mirage/internal/index"
+	"github.com/poitch/mirage/internal/qrcode"
 	"github.com/poitch/mirage/internal/store"
 )
 
@@ -506,7 +507,7 @@ func (ad *Admin) setUpDevice(w http.ResponseWriter, r *http.Request, sess *sessi
 	}
 
 	setupURL := auth.HandoffURL(ad.externalURL, u.Username, appPassword)
-	code, err := qrSVG(setupURL)
+	code, err := qrcode.SVG(setupURL)
 	if err != nil {
 		ad.internalError(w, "render sign-in code", err)
 		return

@@ -1,0 +1,54 @@
+{{ template "head" . }}
+{{ template "nav" . }}
+<main>
+  {{ if .Notice }}<p class="banner ok">{{ .Notice }}</p>{{ end }}
+  {{ if .Error }}<p class="banner">{{ .Error }}</p>{{ end }}
+
+  <p class="crumbs"><span class="here">Deleted files</span></p>
+
+  <div class="card">
+    {{ if .Entries }}
+    <table>
+      <thead>
+        <tr><th>Name</th><th class="size">Size</th><th class="when">Deleted</th><th></th></tr>
+      </thead>
+      <tbody>
+        {{ range .Entries }}
+        <tr>
+          <td>
+            <span class="icon-cell">
+              <span class="icon">{{ if .IsDir }}&#128193;{{ else }}&#128196;{{ end }}</span>
+              <span class="label">
+                {{ .Name }}<br><span class="where">was in {{ .Where }}</span>
+              </span>
+            </span>
+          </td>
+          <td class="size">{{ if .IsDir }}&mdash;{{ else }}{{ .Size }}{{ end }}</td>
+          <td class="when">{{ .Modified }}</td>
+          <td class="actions-cell">
+            <form method="post" action="/web/trash/restore">
+              <input type="hidden" name="csrf" value="{{ $.CSRF }}">
+              <input type="hidden" name="entry" value="{{ .Token }}">
+              <button class="link" type="submit">Restore</button>
+            </form>
+            <form method="post" action="/web/trash/delete">
+              <input type="hidden" name="csrf" value="{{ $.CSRF }}">
+              <input type="hidden" name="entry" value="{{ .Token }}">
+              <button class="link" type="submit">Delete for good</button>
+            </form>
+          </td>
+        </tr>
+        {{ end }}
+      </tbody>
+    </table>
+    {{ else }}
+    <p class="empty">Nothing has been deleted.</p>
+    {{ end }}
+  </div>
+
+  {{ if .Entries }}
+  <p class="note">
+    Deleted files still take up your space until they are removed for good.
+  </p>
+  {{ end }}
+</main>

@@ -19,6 +19,7 @@ import (
 	"github.com/poitch/mirage/internal/preview"
 	"github.com/poitch/mirage/internal/push"
 	"github.com/poitch/mirage/internal/store"
+	"github.com/poitch/mirage/internal/versions"
 	"github.com/poitch/mirage/internal/web"
 )
 
@@ -93,12 +94,13 @@ func New(ctx context.Context, cfg *config.Config, db *store.DB, log *slog.Logger
 	if cfg.Trash.Enabled {
 		davHandler.SetTrashRetention(cfg.Trash.Retention.Duration())
 	}
-	davHandler.SetVersionPolicy(dav.VersionPolicy{
+	keeper := versions.NewKeeper(db, versions.Policy{
 		Enabled:     cfg.Versions.Enabled,
 		Retention:   cfg.Versions.Retention.Duration(),
 		MaxPerFile:  cfg.Versions.MaxPerFile,
 		MaxFileSize: cfg.Versions.MaxFileSize,
-	})
+	}, log)
+	davHandler.SetVersionKeeper(keeper)
 	uploadHandler := dav.NewUploadHandler(db, storage, updater, log, instanceID)
 
 	loginFlow, err := auth.NewLoginFlow(db, authenticator, cfg.Server.ExternalURL, log)
@@ -141,10 +143,14 @@ func New(ctx context.Context, cfg *config.Config, db *store.DB, log *slog.Logger
 		}
 	}
 
-	site, err := web.New(db, authenticator, storage, cfg.Server.ExternalURL, log)
+	site, err := web.New(db, authenticator, storage, scanner, updater,
+		cfg.Server.ExternalURL, log)
 	if err != nil {
 		return nil, fmt.Errorf("build the web view: %w", err)
 	}
+	// The page must never offer a control the server would refuse, so it is
+	// told what is actually on rather than reading the config again.
+	site.SetFeatures(cfg.Trash.Enabled, keeper, previews)
 
 	// A password changed or an account disabled on the admin page has to end
 	// that account's browser sessions too.

@@ -1,4 +1,9 @@
-package admin
+// Package qrcode renders sign-in codes.
+//
+// Used by both the admin page and a person's own profile page: an
+// administrator can set up somebody's phone for them, and somebody can set up
+// their own without having to ask.
+package qrcode
 
 import (
 	"fmt"
@@ -15,7 +20,7 @@ import (
 // markup rather than a fetched resource. It also scales without blurring,
 // which matters when the thing scanning it is a phone camera held at whatever
 // distance.
-func qrSVG(text string) (template.HTML, error) {
+func SVG(text string) (template.HTML, error) {
 	// Medium recovery: enough redundancy for a screen photographed at an angle,
 	// without inflating the code so far that the modules get small.
 	code, err := qr.Encode(text, qr.M)

@@ -251,7 +251,7 @@ func (v *VersionHandler) restore(w http.ResponseWriter, r *http.Request, user st
 	// The current contents become a version of their own first, so that
 	// restoring is itself undoable - somebody who restores the wrong one has
 	// not lost anything.
-	if err := v.keepVersion(r, st, user, node); err != nil {
+	if err := v.versions.Keep(r.Context(), st, user, node); err != nil {
 		v.log.Error("could not keep the current contents before restoring a version",
 			"user", user.Username, "path", node.Path, "error", err)
 		http.Error(w, "could not restore that version", http.StatusInternalServerError)

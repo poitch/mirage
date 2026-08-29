@@ -44,12 +44,29 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	h.serve(w, r, user, node, Bucket(requestedSize(r)))
+}
+
+// ServeFor answers a preview for an account resolved elsewhere.
+//
+// The browser view has a session rather than sync credentials, so it cannot go
+// through ServeHTTP - but it must reach exactly the same confinement, which is
+// why it hands the account in rather than re-implementing the lookup.
+func (h *Handler) ServeFor(w http.ResponseWriter, r *http.Request, user store.User, fileID int64, size int) {
+	node, err := store.NodeByID(r.Context(), h.db, user.ID, fileID)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	h.serve(w, r, user, node, Bucket(size))
+}
+
+func (h *Handler) serve(w http.ResponseWriter, r *http.Request, user store.User, node store.Node, size int) {
 	if node.IsDir || !Supported(node.Name) {
 		http.NotFound(w, r)
 		return
 	}
 
-	size := Bucket(requestedSize(r))
 	key := Key(user.ID, node.ID, node.ETag, size)
 	etag := `"` + key[:24] + `"`
 
