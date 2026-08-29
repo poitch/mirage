@@ -1,0 +1,78 @@
+{{ template "head" . }}
+<style>
+  body { display: grid; place-items: center; padding: 2rem 1.25rem; }
+  main { width: 100%; max-width: 30rem; }
+  .lead { margin: 0 0 1.5rem; }
+  .lead h1 { font-size: 1.5rem; margin-bottom: .35rem; }
+  .step { display: flex; gap: .875rem; padding: 1rem 0; border-bottom: 1px solid var(--border); }
+  .step:last-child { border-bottom: 0; }
+  .num {
+    flex: none; width: 1.5rem; height: 1.5rem; border-radius: 50%;
+    background: var(--muted); color: var(--muted-foreground);
+    display: grid; place-items: center; font-size: .75rem; font-weight: 600;
+  }
+  .step .body { min-width: 0; flex: 1; }
+  .step h2 { margin-bottom: .2rem; }
+  .step p { margin: 0; color: var(--muted-foreground); font-size: .8125rem; }
+  .server {
+    display: flex; align-items: center; gap: .5rem; margin: .625rem 0 0;
+    padding: .625rem .75rem; background: var(--muted);
+    border-radius: calc(var(--radius) - 2px);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: .8125rem; overflow-wrap: anywhere; color: var(--foreground);
+  }
+  .get { margin-top: .75rem; }
+  .others { margin-top: .625rem; font-size: .75rem; color: var(--muted-foreground); }
+  .others a { color: var(--muted-foreground); }
+  .foot { margin-top: 1.25rem; text-align: center; font-size: .8125rem; color: var(--muted-foreground); }
+  .foot a { color: var(--foreground); }
+</style>
+<main>
+  <div class="lead">
+    <h1>Mirage</h1>
+    <p class="hint">
+      {{ .T "landing.lead" }}
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="step">
+      <span class="num">1</span>
+      <div class="body">
+        <h2>{{ .T "landing.step1" }}</h2>
+        <p>
+          {{ .T "landing.step1.desc" }}
+          {{ if .PlatformName }}{{ .Tf "landing.platform" .PlatformName }}{{ end }}
+        </p>
+        <p class="get"><a class="btn" href="{{ .ClientURL }}" rel="noopener">{{ .ClientLabel }}</a></p>
+        <p class="others">
+          {{ .T "landing.others" }}
+          {{ range $i, $c := .OtherClients }}{{ if $i }} &middot; {{ end }}<a href="{{ $c.URL }}" rel="noopener">{{ $c.Name }}</a>{{ end }}
+        </p>
+      </div>
+    </div>
+
+    <div class="step">
+      <span class="num">2</span>
+      <div class="body">
+        <h2>{{ .T "landing.step2" }}</h2>
+        <p>{{ .T "landing.step2.desc" }}</p>
+        <div class="server">{{ .ServerURL }}</div>
+      </div>
+    </div>
+
+    <div class="step">
+      <span class="num">3</span>
+      <div class="body">
+        <h2>{{ .T "landing.step3" }}</h2>
+        <p>
+          {{ .T "landing.step3.desc" }}
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <p class="foot">
+    {{ .T "landing.already" }} <a href="/web/">{{ .T "landing.open" }}</a>
+  </p>
+</main>

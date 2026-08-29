@@ -8,50 +8,47 @@
 
   <div class="card pad stack">
     <div>
-      <h2>Password</h2>
+      <h2>{{ .T "profile.password" }}</h2>
       <p class="hint">
-        Used to sign in here and to pair a new device. Devices already set up
-        keep working: each one has its own credential.
+        {{ .T "profile.passwordHint" }}
       </p>
       <form method="post" action="/web/profile/password">
         <input type="hidden" name="csrf" value="{{ .CSRF }}">
-        <label for="current">Current password</label>
+        <label for="current">{{ .T "profile.current" }}</label>
         <input id="current" name="current" type="password" autocomplete="current-password" required>
-        <label for="password">New password</label>
+        <label for="password">{{ .T "profile.new" }}</label>
         <input id="password" name="password" type="password" autocomplete="new-password" required>
-        <label for="confirm">New password again</label>
+        <label for="confirm">{{ .T "profile.confirm" }}</label>
         <input id="confirm" name="confirm" type="password" autocomplete="new-password" required>
         <div class="actions">
-          <button type="submit">Change password</button>
+          <button type="submit">{{ .T "profile.change" }}</button>
         </div>
       </form>
     </div>
 
     <hr>
     <div>
-      <h2>Add a device</h2>
+      <h2>{{ .T "profile.addDevice" }}</h2>
       {{ if .QR }}
         <p class="hint">
-          Open the Nextcloud app on the device, choose to sign in, and scan this.
-          It works once and is not shown again.
+          {{ .T "profile.scanHint" }}
         </p>
         <div class="qr">{{ .QR }}</div>
         <p class="hint">
-          If the app cannot scan, this is the same thing as a link:
+          {{ .T "profile.linkHint" }}
         </p>
         <code class="url">{{ .SetupURL }}</code>
-        <p class="note"><a href="/web/profile">Done</a></p>
+        <p class="note"><a href="/web/profile">{{ .T "profile.done" }}</a></p>
       {{ else }}
         <p class="hint">
-          Produces a code to scan in the Nextcloud app, which signs a phone or
-          tablet in without typing an address or a password.
+          {{ .T "profile.addHint" }}
         </p>
         <form method="post" action="/web/profile/device">
           <input type="hidden" name="csrf" value="{{ .CSRF }}">
-          <label for="label">Which device?</label>
-          <input id="label" name="label" type="text" maxlength="64" placeholder="e.g. my phone">
+          <label for="label">{{ .T "profile.whichDevice" }}</label>
+          <input id="label" name="label" type="text" maxlength="64" placeholder="{{ .T `profile.devicePlaceholder` }}">
           <div class="actions">
-            <button type="submit">Show sign-in code</button>
+            <button type="submit">{{ .T "profile.showCode" }}</button>
           </div>
         </form>
       {{ end }}
@@ -60,26 +57,26 @@
     {{ if .Devices }}
     <hr>
     <div>
-      <h2>Devices</h2>
+      <h2>{{ .T "profile.devices" }}</h2>
       <table>
-        <thead><tr><th>Device</th><th class="when">Added</th><th></th></tr></thead>
+        <thead><tr><th>{{ .T "profile.devices" }}</th><th class="when">{{ .T "profile.added" }}</th><th></th></tr></thead>
         <tbody>
           {{ range .Devices }}
           <tr>
-            <td>{{ .Label }}{{ if .LastUsed }}<br><span class="where">last used {{ .LastUsed }}</span>{{ end }}</td>
+            <td>{{ .Label }}{{ if .LastUsed }}<br><span class="where">{{ $.Tf "profile.lastUsed" .LastUsed }}</span>{{ end }}</td>
             <td class="when">{{ .Created }}</td>
             <td class="actions-cell">
               <form method="post" action="/web/profile/device/revoke">
                 <input type="hidden" name="csrf" value="{{ $.CSRF }}">
                 <input type="hidden" name="id" value="{{ .ID }}">
-                <button class="link" type="submit">Revoke</button>
+                <button class="link" type="submit">{{ $.T "profile.revoke" }}</button>
               </form>
             </td>
           </tr>
           {{ end }}
         </tbody>
       </table>
-      <p class="note">Revoking signs that device out. It will ask to be set up again.</p>
+      <p class="note">{{ .T "profile.revokeNote" }}</p>
     </div>
     {{ end }}
   </div>

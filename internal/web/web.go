@@ -102,6 +102,8 @@ func (s *Site) ForgetSessions(userID int64) { s.sessions.destroyFor(userID) }
 
 // Routes registers the browser view.
 func (s *Site) Routes(mux *http.ServeMux) {
+	// The address somebody is handed is the root, and until now that was a 404.
+	mux.HandleFunc("GET /{$}", s.landing)
 	mux.HandleFunc("GET "+loginPath, s.loginPage)
 	mux.HandleFunc("POST "+loginPath, s.login)
 	mux.HandleFunc("POST "+logoutPath, s.logout)
@@ -161,6 +163,9 @@ func (s *Site) guard(h func(http.ResponseWriter, *http.Request, *session)) http.
 
 // pageData is what every template is given.
 type pageData struct {
+	// Lang is the language this page is rendered in, chosen from what the
+	// browser asked for.
+	Lang        lang
 	Title       string
 	Username    string
 	DisplayName string
@@ -180,6 +185,13 @@ type pageData struct {
 	// that produced them; the credential cannot be shown again.
 	QR       template.HTML
 	SetupURL template.URL
+
+	// The landing page tells somebody how to connect a device.
+	PlatformName string
+	ClientLabel  string
+	ClientURL    string
+	ServerURL    string
+	OtherClients []client
 
 	// The versions page describes one file.
 	FileID          int64
@@ -227,15 +239,15 @@ func (s *Site) loginPage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	s.render(w, "login.html", http.StatusOK, pageData{
-		Title: "Sign in", Next: safeNext(r.URL.Query().Get("next")),
+	s.render(w, r, "login.html", http.StatusOK, pageData{
+		Title: s.t(r, "login.title"), Next: safeNext(r.URL.Query().Get("next")),
 	})
 }
 
 func (s *Site) login(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
-		s.render(w, "login.html", http.StatusBadRequest,
-			pageData{Title: "Sign in", Error: "That form could not be read."})
+		s.render(w, r, "login.html", http.StatusBadRequest,
+			pageData{Title: s.t(r, "login.title"), Error: s.t(r, "login.unreadable")})
 		return
 	}
 	username := r.PostFormValue("username")
@@ -251,8 +263,8 @@ func (s *Site) login(w http.ResponseWriter, r *http.Request) {
 			s.log.Info("rejected a web sign-in", "username", username, "agent", r.UserAgent())
 		}
 		time.Sleep(failedLoginDelay)
-		s.render(w, "login.html", http.StatusUnauthorized, pageData{
-			Title: "Sign in", Error: "Wrong username or password.", Next: next,
+		s.render(w, r, "login.html", http.StatusUnauthorized, pageData{
+			Title: s.t(r, "login.title"), Error: s.t(r, "login.wrong"), Next: next,
 		})
 		return
 	}
@@ -337,17 +349,17 @@ func (s *Site) renderFolder(w http.ResponseWriter, r *http.Request, sess *sessio
 
 	entries := make([]entry, 0, len(children))
 	for _, c := range children {
-		e := s.entryFor(sess, c)
+		e := s.entryFor(sess, languageFor(r), c)
 		e.Highlight = highlight != "" && c.Name == highlight
 		entries = append(entries, e)
 	}
 
-	s.render(w, "browse.html", http.StatusOK, pageData{
+	s.render(w, r, "browse.html", http.StatusOK, pageData{
 		Title:    titleFor(clean),
 		Username: sess.username,
 		CSRF:     sess.csrf,
 		Notice:   r.URL.Query().Get("notice"),
-		Crumbs:   crumbsFor(clean),
+		Crumbs:   crumbsFor(clean, s.t(r, "browse.root")),
 		Entries:  entries,
 	})
 }
@@ -408,7 +420,13 @@ func (s *Site) download(w http.ResponseWriter, r *http.Request, sess *session) {
 	http.ServeContent(w, r, node.Name, info.ModTime(), f)
 }
 
-func (s *Site) render(w http.ResponseWriter, name string, status int, data pageData) {
+func (s *Site) render(w http.ResponseWriter, r *http.Request, name string, status int, data pageData) {
+	// Set here rather than in each handler, because a page that forgot would
+	// silently fall back to English and nobody would notice until a French
+	// reader did.
+	if data.Lang == "" {
+		data.Lang = languageFor(r)
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -469,8 +487,8 @@ func titleFor(p string) string {
 }
 
 // crumbsFor builds the trail back to the top.
-func crumbsFor(p string) []crumb {
-	out := []crumb{{Name: "Files", URL: rootPath}}
+func crumbsFor(p, root string) []crumb {
+	out := []crumb{{Name: root, URL: rootPath}}
 	if p == "." || p == "" {
 		out[0].Current = true
 		return out

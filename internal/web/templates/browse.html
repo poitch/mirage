@@ -5,16 +5,16 @@
   {{ if .Error }}<p class="banner">{{ .Error }}</p>{{ end }}
 
   <form class="search" method="get" action="/web/search">
-    <input name="q" value="{{ .Query }}" placeholder="Search your files by name"
+    <input name="q" value="{{ .Query }}" placeholder="{{ .T `browse.search` }}"
            autocapitalize="none" autocorrect="off" spellcheck="false">
-    <button type="submit">Search</button>
+    <button type="submit">{{ .T "browse.searchButton" }}</button>
   </form>
 
   {{ if .Searching }}
     <p class="crumbs">
-      {{ if .Entries }}Files matching <strong>{{ .Query }}</strong>
-      {{ else }}Nothing matches <strong>{{ .Query }}</strong>{{ end }}
-      <span class="sep">&middot;</span><a href="/web/">back to files</a>
+      {{ if .Entries }}{{ .T "browse.matching" }} <strong>{{ .Query }}</strong>
+      {{ else }}{{ .T "browse.nothing" }} <strong>{{ .Query }}</strong>{{ end }}
+      <span class="sep">&middot;</span><a href="/web/">{{ .T "browse.back" }}</a>
     </p>
   {{ else }}
     <p class="crumbs">
@@ -30,7 +30,7 @@
     <table>
       <thead>
         <tr>
-          <th>Name</th><th class="size">Size</th><th class="when">Modified</th><th></th>
+          <th>{{ .T "col.name" }}</th><th class="size">{{ .T "col.size" }}</th><th class="when">{{ .T "col.modified" }}</th><th></th>
         </tr>
       </thead>
       <tbody>
@@ -49,19 +49,18 @@
           <td class="size">{{ if .IsDir }}&mdash;{{ else }}{{ .Size }}{{ end }}</td>
           <td class="when">{{ .Modified }}</td>
           <td class="actions-cell">
-            {{ if .VersionsURL }}<a href="{{ .VersionsURL }}">Versions</a>{{ end }}
+            {{ if .VersionsURL }}<a href="{{ .VersionsURL }}">{{ $.T "browse.versions" }}</a>{{ end }}
           </td>
         </tr>
         {{ end }}
       </tbody>
     </table>
     {{ else if not .Searching }}
-    <p class="empty">This folder is empty.</p>
+    <p class="empty">{{ .T "browse.empty" }}</p>
     {{ end }}
   </div>
 
   <p class="note">
-    Mirage is a sync server. This page browses, downloads and restores; to work
-    with your files, use the Nextcloud client.
+    {{ .T "browse.note" }}
   </p>
 </main>

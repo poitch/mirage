@@ -8,17 +8,17 @@
 </style>
 <main>
   <div class="card pad">
-    <h1>Sign in</h1>
-    <p class="sub">Use your Mirage account, the same one your sync client uses.</p>
+    <h1>{{ .T "login.title" }}</h1>
+    <p class="sub hint">{{ .T "login.sub" }}</p>
     {{ if .Error }}<p class="banner">{{ .Error }}</p>{{ end }}
     <form method="post" action="/web/login">
       <input type="hidden" name="next" value="{{ .Next }}">
-      <label for="username">Username</label>
-      <input id="username" name="username" autocapitalize="none" autocorrect="off"
+      <label for="username">{{ .T "login.username" }}</label>
+      <input id="username" name="username" type="text" autocapitalize="none" autocorrect="off"
              spellcheck="false" autocomplete="username" required autofocus>
-      <label for="password">Password</label>
+      <label for="password">{{ .T "login.password" }}</label>
       <input id="password" name="password" type="password" autocomplete="current-password" required>
-      <button type="submit">Sign in</button>
+      <button type="submit">{{ .T "login.submit" }}</button>
     </form>
   </div>
 </main>

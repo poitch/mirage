@@ -41,6 +41,8 @@ func (s *Site) renderProfile(w http.ResponseWriter, r *http.Request, sess *sessi
 		s.internalError(w, "look up account", err)
 		return
 	}
+	l := languageFor(r)
+	data.Lang = l
 	data.Title = user.Username
 	data.Username = sess.username
 	data.CSRF = sess.csrf
@@ -58,12 +60,12 @@ func (s *Site) renderProfile(w http.ResponseWriter, r *http.Request, sess *sessi
 		s.log.Warn("could not list devices", "user", user.Username, "error", err)
 	}
 	for _, p := range passwords {
-		d := device{ID: p.ID, Label: p.Name, Created: p.CreatedAt.Local().Format("2 Jan 2006")}
+		d := device{ID: p.ID, Label: p.Name, Created: l.DateOnly(p.CreatedAt)}
 		if d.Label == "" {
-			d.Label = "Unnamed device"
+			d.Label = data.T("profile.unnamed")
 		}
 		if !p.LastUsedAt.IsZero() {
-			d.LastUsed = p.LastUsedAt.Local().Format("2 Jan 2006")
+			d.LastUsed = l.DateOnly(p.LastUsedAt)
 		}
 		data.Devices = append(data.Devices, d)
 	}
@@ -72,7 +74,7 @@ func (s *Site) renderProfile(w http.ResponseWriter, r *http.Request, sess *sessi
 	if data.Error != "" {
 		status = http.StatusBadRequest
 	}
-	s.render(w, "profile.html", status, data)
+	s.render(w, r, "profile.html", status, data)
 }
 
 // changePassword sets a new account password.
@@ -93,20 +95,20 @@ func (s *Site) changePassword(w http.ResponseWriter, r *http.Request, sess *sess
 	if _, err := s.auth.Verify(r.Context(), user.Username, current); err != nil {
 		s.log.Info("rejected a password change with the wrong current password",
 			"user", user.Username)
-		s.renderProfile(w, r, sess, pageData{Error: "That is not your current password."})
+		s.renderProfile(w, r, sess, pageData{Error: s.t(r, "profile.notCurrent")})
 		return
 	}
 	switch {
 	case next != confirm:
-		s.renderProfile(w, r, sess, pageData{Error: "The two new passwords do not match."})
+		s.renderProfile(w, r, sess, pageData{Error: s.t(r, "profile.mismatch")})
 		return
 	case len(next) < minPasswordLen:
 		s.renderProfile(w, r, sess, pageData{
-			Error: "A password must be at least " + strconv.Itoa(minPasswordLen) + " characters.",
+			Error: s.tf(r, "profile.tooShort", minPasswordLen),
 		})
 		return
 	case next == current:
-		s.renderProfile(w, r, sess, pageData{Error: "That is the password you already have."})
+		s.renderProfile(w, r, sess, pageData{Error: s.t(r, "profile.same")})
 		return
 	}
 
@@ -128,7 +130,7 @@ func (s *Site) changePassword(w http.ResponseWriter, r *http.Request, sess *sess
 	// own credentials and are unaffected, and being logged out of every browser
 	// for changing a password is a surprise rather than a safeguard.
 	s.renderProfile(w, r, sess, pageData{
-		Notice: "Password changed. Devices you have already set up are unaffected.",
+		Notice: s.t(r, "profile.changed"),
 	})
 }
 
@@ -173,14 +175,14 @@ func (s *Site) addDevice(w http.ResponseWriter, r *http.Request, sess *session) 
 func (s *Site) revokeDevice(w http.ResponseWriter, r *http.Request, sess *session) {
 	id, err := strconv.ParseInt(r.PostFormValue("id"), 10, 64)
 	if err != nil {
-		s.renderProfile(w, r, sess, pageData{Error: "That device could not be found."})
+		s.renderProfile(w, r, sess, pageData{Error: s.t(r, "profile.noDevice")})
 		return
 	}
 	// Scoped to the account, so an id belonging to somebody else revokes
 	// nothing and reports the same thing as one that never existed.
 	err = s.db.DeleteAppPasswordByID(r.Context(), sess.userID, id)
 	if errors.Is(err, store.ErrNotFound) {
-		s.renderProfile(w, r, sess, pageData{Error: "That device could not be found."})
+		s.renderProfile(w, r, sess, pageData{Error: s.t(r, "profile.noDevice")})
 		return
 	} else if err != nil {
 		s.internalError(w, "revoke device", err)
@@ -190,5 +192,5 @@ func (s *Site) revokeDevice(w http.ResponseWriter, r *http.Request, sess *sessio
 	s.auth.Forget(sess.username)
 
 	s.log.Info("device credential revoked by its owner", "user", sess.username, "device", id)
-	s.renderProfile(w, r, sess, pageData{Notice: "That device has been signed out."})
+	s.renderProfile(w, r, sess, pageData{Notice: s.t(r, "profile.revoked")})
 }

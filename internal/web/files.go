@@ -37,16 +37,17 @@ func (s *Site) search(w http.ResponseWriter, r *http.Request, sess *session) {
 		return
 	}
 
+	l := languageFor(r)
 	entries := make([]entry, 0, len(matches))
 	for _, n := range matches {
-		e := s.entryFor(sess, n)
+		e := s.entryFor(sess, l, n)
 		// A result out of context is just a filename; the folder is what tells
 		// two files of the same name apart.
-		e.Where = "in " + displayFolder(n.Path)
+		e.Where = s.tf(r, "browse.in", displayFolder(n.Path, l))
 		entries = append(entries, e)
 	}
 
-	s.render(w, "browse.html", http.StatusOK, pageData{
+	s.render(w, r, "browse.html", http.StatusOK, pageData{
 		Title:     "Search",
 		Username:  sess.username,
 		CSRF:      sess.csrf,
@@ -57,12 +58,12 @@ func (s *Site) search(w http.ResponseWriter, r *http.Request, sess *session) {
 }
 
 // entryFor renders one indexed node as a row.
-func (s *Site) entryFor(sess *session, n store.Node) entry {
+func (s *Site) entryFor(sess *session, l lang, n store.Node) entry {
 	e := entry{
 		Name:     n.Name,
 		IsDir:    n.IsDir,
 		Size:     formatBytes(n.Size),
-		Modified: n.MTime.Local().Format("2 Jan 2006, 15:04"),
+		Modified: l.Date(n.MTime),
 	}
 	if n.IsDir {
 		e.URL = browseURL(n.Path, "")
@@ -119,20 +120,21 @@ func (s *Site) trash(w http.ResponseWriter, r *http.Request, sess *session) {
 		return
 	}
 
+	l := languageFor(r)
 	rows := make([]entry, 0, len(entries))
 	for _, e := range entries {
 		rows = append(rows, entry{
 			Name:     path.Base(e.OriginalPath),
 			IsDir:    e.IsDir,
 			Size:     formatBytes(e.Size),
-			Modified: e.DeletedAt.Local().Format("2 Jan 2006, 15:04"),
-			Where:    displayFolder(e.OriginalPath),
+			Modified: l.Date(e.DeletedAt),
+			Where:    displayFolder(e.OriginalPath, l),
 			Token:    e.Name,
 		})
 	}
 
-	s.render(w, "trash.html", http.StatusOK, pageData{
-		Title:    "Deleted files",
+	s.render(w, r, "trash.html", http.StatusOK, pageData{
+		Title:    s.t(r, "trash.title"),
 		Username: sess.username,
 		CSRF:     sess.csrf,
 		Notice:   r.URL.Query().Get("notice"),
@@ -161,7 +163,7 @@ func (s *Site) restoreTrash(w http.ResponseWriter, r *http.Request, sess *sessio
 	if err := st.RestoreFromTrash(entry.Name, target); err != nil {
 		s.log.Warn("could not restore a deleted file",
 			"user", user.Username, "entry", entry.Name, "error", err)
-		s.redirect(w, r, "/web/trash", "That file could not be restored.")
+		s.redirect(w, r, "/web/trash", s.t(r, "trash.failed"))
 		return
 	}
 	if err := store.RemoveTrashEntry(r.Context(), s.db, user.ID, entry.Name); err != nil {
@@ -176,7 +178,7 @@ func (s *Site) restoreTrash(w http.ResponseWriter, r *http.Request, sess *sessio
 	}
 
 	s.log.Info("restored a deleted file from the web", "user", user.Username, "path", target)
-	s.redirect(w, r, "/web/trash", "Restored to "+target+".")
+	s.redirect(w, r, "/web/trash", s.tf(r, "trash.restoredTo", target))
 }
 
 // deleteTrash removes a deleted file for good.
@@ -199,7 +201,7 @@ func (s *Site) deleteTrash(w http.ResponseWriter, r *http.Request, sess *session
 		s.internalError(w, "forget trash entry", err)
 		return
 	}
-	s.redirect(w, r, "/web/trash", "Removed for good.")
+	s.redirect(w, r, "/web/trash", s.t(r, "trash.removed"))
 }
 
 // trashTarget resolves the entry a form names, confined to the account.
@@ -215,7 +217,7 @@ func (s *Site) trashTarget(w http.ResponseWriter, r *http.Request, sess *session
 	// not found.
 	entry, err := store.TrashByName(r.Context(), s.db, user.ID, r.PostFormValue("entry"))
 	if errors.Is(err, store.ErrNotFound) {
-		s.redirect(w, r, "/web/trash", "That file is no longer in the trash.")
+		s.redirect(w, r, "/web/trash", s.t(r, "trash.gone"))
 		return store.User{}, store.TrashEntry{}, nil, false
 	} else if err != nil {
 		s.internalError(w, "look up trash entry", err)
@@ -251,17 +253,18 @@ func (s *Site) versionsPage(w http.ResponseWriter, r *http.Request, sess *sessio
 		s.internalError(w, "list versions", err)
 		return
 	}
+	l := languageFor(r)
 	rows := make([]entry, 0, len(versions))
 	for _, v := range versions {
 		rows = append(rows, entry{
-			Modified: v.Timestamp.Local().Format("2 Jan 2006, 15:04"),
+			Modified: l.Date(v.Timestamp),
 			Size:     formatBytes(v.Size),
 			URL:      versionDownloadURL(node.ID, v.Timestamp.Unix()),
 			Token:    strconv.FormatInt(v.Timestamp.Unix(), 10),
 		})
 	}
 
-	s.render(w, "versions.html", http.StatusOK, pageData{
+	s.render(w, r, "versions.html", http.StatusOK, pageData{
 		Title:           node.Name,
 		Username:        sess.username,
 		CSRF:            sess.csrf,
@@ -269,10 +272,10 @@ func (s *Site) versionsPage(w http.ResponseWriter, r *http.Request, sess *sessio
 		FileID:          node.ID,
 		Entries:         rows,
 		ParentURL:       browseURL(path.Dir(node.Path), node.Name),
-		ParentName:      displayFolder(node.Path),
+		ParentName:      displayFolder(node.Path, l),
 		DownloadURL:     downloadURL(node.Path),
 		CurrentSize:     formatBytes(node.Size),
-		CurrentModified: node.MTime.Local().Format("2 Jan 2006, 15:04"),
+		CurrentModified: l.Date(node.MTime),
 	})
 }
 
@@ -328,7 +331,7 @@ func (s *Site) restoreVersion(w http.ResponseWriter, r *http.Request, sess *sess
 	if err := s.keeper.Keep(r.Context(), st, user, node); err != nil {
 		s.log.Error("could not keep the current contents before restoring",
 			"user", user.Username, "path", node.Path, "error", err)
-		s.redirect(w, r, versionsPageURL(node.ID), "That version could not be restored.")
+		s.redirect(w, r, versionsPageURL(node.ID), s.t(r, "versions.failed"))
 		return
 	}
 
@@ -336,7 +339,7 @@ func (s *Site) restoreVersion(w http.ResponseWriter, r *http.Request, sess *sess
 	if err != nil {
 		s.log.Warn("could not restore a version",
 			"user", user.Username, "path", node.Path, "error", err)
-		s.redirect(w, r, versionsPageURL(node.ID), "That version could not be restored.")
+		s.redirect(w, r, versionsPageURL(node.ID), s.t(r, "versions.failed"))
 		return
 	}
 	if _, err := s.updater.FileWritten(r.Context(), user, node.Path, result.Size, result.MTime); err != nil {
@@ -347,7 +350,7 @@ func (s *Site) restoreVersion(w http.ResponseWriter, r *http.Request, sess *sess
 	s.log.Info("restored an earlier version from the web",
 		"user", user.Username, "path", node.Path, "version", ver.Timestamp)
 	s.redirect(w, r, versionsPageURL(node.ID),
-		"Restored the version from "+ver.Timestamp.Local().Format("2 Jan 2006, 15:04")+".")
+		s.tf(r, "versions.restored", languageFor(r).Date(ver.Timestamp)))
 }
 
 // versionTarget resolves the file and version a request names.
@@ -418,10 +421,10 @@ func versionFileName(name string, at time.Time) string {
 }
 
 // displayFolder renders the folder part of a path for a person to read.
-func displayFolder(p string) string {
+func displayFolder(p string, l lang) string {
 	dir := path.Dir(p)
 	if dir == "." || dir == "/" || dir == "" {
-		return "the top level"
+		return pageData{Lang: l}.T("browse.topLevel")
 	}
 	return dir
 }

@@ -4,13 +4,13 @@
   {{ if .Notice }}<p class="banner ok">{{ .Notice }}</p>{{ end }}
   {{ if .Error }}<p class="banner">{{ .Error }}</p>{{ end }}
 
-  <p class="crumbs"><span class="here">Deleted files</span></p>
+  <p class="crumbs"><span class="here">{{ .T "trash.title" }}</span></p>
 
   <div class="card">
     {{ if .Entries }}
     <table>
       <thead>
-        <tr><th>Name</th><th class="size">Size</th><th class="when">Deleted</th><th></th></tr>
+        <tr><th>{{ .T "col.name" }}</th><th class="size">{{ .T "col.size" }}</th><th class="when">{{ .T "trash.deleted" }}</th><th></th></tr>
       </thead>
       <tbody>
         {{ range .Entries }}
@@ -19,7 +19,7 @@
             <span class="icon-cell">
               <span class="icon">{{ if .IsDir }}&#128193;{{ else }}&#128196;{{ end }}</span>
               <span class="label">
-                {{ .Name }}<br><span class="where">was in {{ .Where }}</span>
+                {{ .Name }}<br><span class="where">{{ $.Tf "trash.wasIn" .Where }}</span>
               </span>
             </span>
           </td>
@@ -29,12 +29,12 @@
             <form method="post" action="/web/trash/restore">
               <input type="hidden" name="csrf" value="{{ $.CSRF }}">
               <input type="hidden" name="entry" value="{{ .Token }}">
-              <button class="link" type="submit">Restore</button>
+              <button class="link" type="submit">{{ $.T "action.restore" }}</button>
             </form>
             <form method="post" action="/web/trash/delete">
               <input type="hidden" name="csrf" value="{{ $.CSRF }}">
               <input type="hidden" name="entry" value="{{ .Token }}">
-              <button class="link" type="submit">Delete for good</button>
+              <button class="link" type="submit">{{ $.T "trash.forever" }}</button>
             </form>
           </td>
         </tr>
@@ -42,13 +42,13 @@
       </tbody>
     </table>
     {{ else }}
-    <p class="empty">Nothing has been deleted.</p>
+    <p class="empty">{{ .T "trash.empty" }}</p>
     {{ end }}
   </div>
 
   {{ if .Entries }}
   <p class="note">
-    Deleted files still take up your space until they are removed for good.
+    {{ .T "trash.note" }}
   </p>
   {{ end }}
 </main>

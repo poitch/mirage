@@ -38,6 +38,12 @@ Early development. Milestone progress:
 
 ## The web view
 
+Visiting the server's address in a browser now shows setup instructions: which
+app to install for the device you are on, the address to give it, and what to
+expect when signing in. That page and the rest of the browser view are served in
+English or French, chosen from the browser's own `Accept-Language`. The admin
+page is English only.
+
 There is a small browser view at `/web/`, and account holders sign in to it with
 their own Mirage credentials. It browses folders, shows thumbnails, searches by
 filename, restores deleted files and earlier versions, and lets somebody change

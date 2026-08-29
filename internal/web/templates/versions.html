@@ -12,25 +12,25 @@
   <div class="card">
     <table>
       <thead>
-        <tr><th>Version</th><th class="size">Size</th><th></th></tr>
+        <tr><th>{{ .T "versions.column" }}</th><th class="size">{{ .T "col.size" }}</th><th></th></tr>
       </thead>
       <tbody>
         <tr>
-          <td><strong>Current</strong><br><span class="where">{{ .CurrentModified }}</span></td>
+          <td><strong>{{ .T "versions.current" }}</strong><br><span class="where">{{ .CurrentModified }}</span></td>
           <td class="size">{{ .CurrentSize }}</td>
-          <td class="actions-cell"><a href="{{ .DownloadURL }}" download>Download</a></td>
+          <td class="actions-cell"><a href="{{ .DownloadURL }}" download>{{ .T "action.download" }}</a></td>
         </tr>
         {{ range .Entries }}
         <tr>
           <td>{{ .Modified }}</td>
           <td class="size">{{ .Size }}</td>
           <td class="actions-cell">
-            <a href="{{ .URL }}" download>Download</a>
+            <a href="{{ .URL }}" download>{{ $.T "action.download" }}</a>
             <form method="post" action="/web/versions/restore">
               <input type="hidden" name="csrf" value="{{ $.CSRF }}">
               <input type="hidden" name="file" value="{{ $.FileID }}">
               <input type="hidden" name="version" value="{{ .Token }}">
-              <button class="link" type="submit">Restore</button>
+              <button class="link" type="submit">{{ $.T "action.restore" }}</button>
             </form>
           </td>
         </tr>
@@ -40,12 +40,7 @@
   </div>
 
   <p class="note">
-    {{ if .Entries }}
-      Restoring keeps what is there now as another version, so nothing is lost
-      either way.
-    {{ else }}
-      This file has no earlier versions. One is kept each time it is
-      overwritten.
-    {{ end }}
+    {{ if .Entries }}{{ .T "versions.note" }}
+    {{ else }}{{ .T "versions.none" }}{{ end }}
   </p>
 </main>
